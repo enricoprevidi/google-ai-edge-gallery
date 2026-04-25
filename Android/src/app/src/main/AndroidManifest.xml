@@ -50,6 +50,27 @@
     <uses-feature android:name="android.hardware.camera.flash"
         android:required="false" />
 
+    <!--
+      Package visibility for app launcher tools (API 30+).
+      Required by AppLauncherTools to enumerate and launch installed applications.
+    -->
+    <queries>
+        <!-- Enumerate launchable apps -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- Allow opening URLs and generic VIEW intents -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+    </queries>
+
     <application
         android:name="${applicationName}"
         android:allowBackup="true"
