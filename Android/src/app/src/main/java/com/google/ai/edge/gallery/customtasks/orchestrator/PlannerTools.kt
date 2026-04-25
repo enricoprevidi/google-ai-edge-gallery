@@ -17,6 +17,7 @@ package com.google.ai.edge.gallery.customtasks.orchestrator
 
 import android.content.Context
 import android.util.Log
+import com.google.ai.edge.gallery.customtasks.agentchat.AgentTools
 import com.google.ai.edge.gallery.customtasks.agentchat.SkillManagerViewModel
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
@@ -42,6 +43,9 @@ class PlannerTools(
   private val onActionTaken: (OrchestratorAction) -> Unit,
 ) : ToolSet {
 
+  /** Shared AgentTools instance for skill execution. The screen subscribes to its actionChannel. */
+  val agentTools: AgentTools = AgentTools()
+
   @Tool(
     description =
       "Returns the list of available specialist models in the pool, including their names " +
@@ -55,7 +59,8 @@ class PlannerTools(
         "Valid agent types: 'mobile_agent' (flashlight, contacts, calendar, email, map, WiFi), " +
         "'app_launcher' (list/launch apps, send intents), " +
         "'workspace_agent' (read/write files in the workspace folder), " +
-        "'skill_creator' (generate and import new skills). " +
+        "'skill_creator' (generate and import new skills), " +
+        "'skill_agent' (execute installed skills like query-wikipedia, qr-code, calculate-hash via JavaScript). " +
         "Use modelName to select the best specialist from the pool (use listSpecialistModels to discover options). " +
         "Always use this tool rather than attempting to perform device actions directly."
   )
@@ -80,7 +85,7 @@ class PlannerTools(
       AgentType.fromId(agentType)
         ?: return mapOf(
           "error" to
-            "Unknown agent type: '$agentType'. Use: mobile_agent, app_launcher, workspace_agent, skill_creator."
+            "Unknown agent type: '$agentType'. Use: mobile_agent, app_launcher, workspace_agent, skill_creator, skill_agent."
         )
     Log.d(TAG, "dispatchToAgent: type=$type model='$modelName' request=${request.take(100)}")
 
@@ -180,6 +185,30 @@ class PlannerTools(
             )
           )
         Pair(prompt, listOf(tool(skillCreator)))
+      }
+
+      AgentType.SKILL_AGENT -> {
+        // Configure the shared AgentTools so it can resolve skill URLs.
+        agentTools.context = context
+        agentTools.skillManagerViewModel = skillManagerViewModel
+
+        val availableSkills = skillManagerViewModel.getSelectedSkillsNamesAndDescriptions()
+          .ifEmpty { "(none installed)" }
+        val prompt =
+          Contents.of(
+            listOf(
+              Content.Text("You are a skill execution agent. $baseCtx"),
+              Content.Text(
+                "You can execute installed skills using the available tools:\n" +
+                  "- loadSkill(skillName): loads a skill and returns its instructions.\n" +
+                  "- runJs(skillName, scriptName, data): executes a skill's JavaScript and returns the result.\n" +
+                  "\nAvailable skills:\n$availableSkills\n" +
+                  "\nFor query-wikipedia, call: loadSkill(\"query-wikipedia\") then runJs(\"query-wikipedia\", \"index\", <json-data>).\n" +
+                  "Follow the skill instructions returned by loadSkill to determine the correct scriptName and data format."
+              ),
+            )
+          )
+        Pair(prompt, listOf(tool(agentTools)))
       }
     }
   }

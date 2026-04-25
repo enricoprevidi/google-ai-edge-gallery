@@ -635,6 +635,7 @@ constructor(
         BuiltInTaskId.LLM_TINY_GARDEN,
         BuiltInTaskId.LLM_MOBILE_ACTIONS,
         BuiltInTaskId.LLM_AGENT_CHAT,
+        BuiltInTaskId.LLM_ORCHESTRATOR,
       )
     for (task in getTasksByIds(ids = setOfTasks)) {
       // Remove duplicated imported model if existed.
@@ -1006,6 +1007,24 @@ constructor(
           }
         }
 
+        // Backward-compatible fallback: if allowlist doesn't map orchestrator yet,
+        // expose all LLM models so the task is usable instead of showing "0 Models".
+        val orchestratorTask = curTasks.find { it.id == BuiltInTaskId.LLM_ORCHESTRATOR }
+        if (orchestratorTask != null && orchestratorTask.models.isEmpty()) {
+          for (model in nameToModel.values) {
+            if (!model.isLlm) {
+              continue
+            }
+            if (orchestratorTask.models.none { it.name == model.name }) {
+              orchestratorTask.models.add(model)
+            }
+          }
+          Log.d(
+            TAG,
+            "Assigned ${orchestratorTask.models.size} fallback LLM models to orchestrator task.",
+          )
+        }
+
         // Process all tasks.
         processTasks()
 
@@ -1132,6 +1151,7 @@ constructor(
       tasks.get(key = BuiltInTaskId.LLM_CHAT)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_PROMPT_LAB)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_AGENT_CHAT)?.models?.add(model)
+      tasks.get(key = BuiltInTaskId.LLM_ORCHESTRATOR)?.models?.add(model)
       if (model.llmSupportImage) {
         tasks.get(key = BuiltInTaskId.LLM_ASK_IMAGE)?.models?.add(model)
       }

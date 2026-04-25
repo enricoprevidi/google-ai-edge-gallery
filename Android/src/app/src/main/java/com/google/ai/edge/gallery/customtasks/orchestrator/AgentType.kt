@@ -40,6 +40,12 @@ enum class AgentType(val id: String, val displayName: String, val description: S
     displayName = "Skill Creator",
     description =
       "Generates and immediately imports new text-only or JavaScript skills into the skill library.",
+  ),
+  SKILL_AGENT(
+    id = "skill_agent",
+    displayName = "Skill Agent",
+    description =
+      "Executes installed skills (query-wikipedia, calculate-hash, qr-code, etc.) via JavaScript.",
   );
 
   companion object {

@@ -61,9 +61,20 @@ class OrchestratorTask @Inject constructor() : CustomTask {
   // Observable action list consumed by the screen for the dispatch trace UI.
   val curActions = mutableStateListOf<OrchestratorAction>()
 
+  /**
+   * Names of models to include as specialists. Empty set = auto (all downloaded models).
+   * Populated from the model-configuration UI before calling initializeModelFn.
+   */
+  var selectedSpecialistNames: Set<String> = emptySet()
+
   // Managed at runtime; populated during initializeModelFn.
   private var agentModelPool: AgentModelPool? = null
   private var plannerTools: PlannerTools? = null
+
+  /** Provides access to the AgentTools instance used by the skill_agent specialist.
+   *  OrchestratorScreen subscribes to its actionChannel to execute JS skills. */
+  val agentTools: com.google.ai.edge.gallery.customtasks.agentchat.AgentTools?
+    get() = plannerTools?.agentTools
   private var lastPlannerSystemPrompt: Contents? = null
   private var lastPlannerTools: List<com.google.ai.edge.litertlm.ToolProvider> = emptyList()
 
@@ -98,11 +109,12 @@ class OrchestratorTask @Inject constructor() : CustomTask {
 
     // Gather all task models that have been downloaded (totalBytes > 0 as proxy).
     // The planner model is always included; other downloaded models extend the pool.
+    // If selectedSpecialistNames is non-empty, only those models are included.
     val candidateModels: List<Model> = task.models
       .filter { it.name != model.name && it.totalBytes > 0L }
-      .ifEmpty {
-        // No additional models — fall back to a single specialist sharing the planner weights.
-        emptyList()
+      .let { candidates ->
+        if (selectedSpecialistNames.isEmpty()) candidates
+        else candidates.filter { selectedSpecialistNames.contains(it.name) }
       }
 
     // Build the specialist pool. Every specialist gets its own Engine instance via model.copy(),
@@ -232,6 +244,7 @@ You have access to these specialist agents via the dispatchToAgent tool:
 - app_launcher: List, launch, or send structured data to installed apps.
 - workspace_agent: Create, read, write, list, delete files in the user's workspace folder.
 - skill_creator: Generate and immediately import new text or JavaScript skills.
+- skill_agent: Execute installed skills (query-wikipedia, calculate-hash, qr-code, mood-tracker, etc.) via JavaScript.
 
 Available specialist models (pass the exact name as modelName in dispatchToAgent):
 $rosterLines
@@ -239,6 +252,7 @@ $rosterLines
 Model selection guidance:
 - Prefer lightweight models (e.g. containing "270M", "1B") for simple tool-calling tasks like mobile_agent or app_launcher.
 - Prefer larger models (e.g. "4B", "Gemma-4") for complex reasoning, workspace_agent, or skill_creator tasks.
+- Prefer lightweight models for simple skill execution (skill_agent) and device actions (mobile_agent, app_launcher).
 - If a model name contains "multimodal" or "vision", prefer it for tasks involving image understanding.
 - If unsure, call listSpecialistModels() first to inspect the current pool.
 - The planner model itself is always available as a fallback specialist (marked [shared with planner]).
@@ -248,10 +262,11 @@ $skillsList
 
 Rules:
 1. For EVERY request that requires a device or file action, use dispatchToAgent. Never attempt actions directly.
-2. Choose the most appropriate specialist model for each sub-task based on the guidance above.
-3. If a request spans multiple agents, dispatch them sequentially and aggregate the results.
-4. After each dispatch, interpret the result and continue until the full request is satisfied.
-5. Reply clearly and concisely, summarising what was done.
+2. To run an installed skill (e.g. query-wikipedia, qr-code, calculate-hash), dispatch to skill_agent.
+3. Choose the most appropriate specialist model for each sub-task based on the guidance above.
+4. If a request spans multiple agents, dispatch them sequentially and aggregate the results.
+5. After each dispatch, interpret the result and continue until the full request is satisfied.
+6. Reply clearly and concisely, summarising what was done.
     """.trimIndent()
 
     return Contents.of(promptText)
