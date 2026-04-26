@@ -39,12 +39,12 @@ class PlannerTools(
   private val context: Context,
   private val agentModelPool: AgentModelPool,
   private val skillManagerViewModel: SkillManagerViewModel,
+  /** Shared AgentTools instance owned by OrchestratorTask so it's always available for
+   *  the screen to subscribe to, even before the planner model is initialized. */
+  val agentTools: AgentTools,
   private val workspaceUri: () -> String?,
   private val onActionTaken: (OrchestratorAction) -> Unit,
 ) : ToolSet {
-
-  /** Shared AgentTools instance for skill execution. The screen subscribes to its actionChannel. */
-  val agentTools: AgentTools = AgentTools()
 
   @Tool(
     description =
@@ -203,8 +203,8 @@ class PlannerTools(
                   "- loadSkill(skillName): loads a skill and returns its instructions.\n" +
                   "- runJs(skillName, scriptName, data): executes a skill's JavaScript and returns the result.\n" +
                   "\nAvailable skills:\n$availableSkills\n" +
-                  "\nFor query-wikipedia, call: loadSkill(\"query-wikipedia\") then runJs(\"query-wikipedia\", \"index\", <json-data>).\n" +
-                  "Follow the skill instructions returned by loadSkill to determine the correct scriptName and data format."
+                  "\nFor query-wikipedia, call: loadSkill(\"query-wikipedia\") then runJs(\"query-wikipedia\", \"index.html\", <json-data>).\n" +
+                  "For all skills the scriptName is typically \"index.html\". Always follow the instructions returned by loadSkill for the correct data format."
               ),
             )
           )

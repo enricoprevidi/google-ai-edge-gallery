@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateListOf
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.customtasks.agentchat.AgentTools
 import com.google.ai.edge.gallery.customtasks.agentchat.SkillManagerViewModel
 import com.google.ai.edge.gallery.customtasks.common.CustomTask
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskData
@@ -71,10 +72,12 @@ class OrchestratorTask @Inject constructor() : CustomTask {
   private var agentModelPool: AgentModelPool? = null
   private var plannerTools: PlannerTools? = null
 
-  /** Provides access to the AgentTools instance used by the skill_agent specialist.
-   *  OrchestratorScreen subscribes to its actionChannel to execute JS skills. */
-  val agentTools: com.google.ai.edge.gallery.customtasks.agentchat.AgentTools?
-    get() = plannerTools?.agentTools
+  /**
+   * Eagerly created at task startup so OrchestratorScreen can always subscribe to its
+   * actionChannel and keep the WebView alive, even before the planner model is initialized.
+   * context and skillManagerViewModel are populated in initializeModelFn.
+   */
+  val agentTools: AgentTools = AgentTools()
   private var lastPlannerSystemPrompt: Contents? = null
   private var lastPlannerTools: List<com.google.ai.edge.litertlm.ToolProvider> = emptyList()
 
@@ -164,11 +167,16 @@ class OrchestratorTask @Inject constructor() : CustomTask {
           .getString("workspace_uri", null)
       }
 
+      // Wire up context and skillManagerViewModel on the shared AgentTools instance.
+      agentTools.context = context
+      agentTools.skillManagerViewModel = skillManagerViewModel
+
       val tools =
         PlannerTools(
           context = context,
           agentModelPool = pool,
           skillManagerViewModel = skillManagerViewModel,
+          agentTools = agentTools,
           workspaceUri = workspaceUri,
           onActionTaken = { curActions.add(it) },
         )

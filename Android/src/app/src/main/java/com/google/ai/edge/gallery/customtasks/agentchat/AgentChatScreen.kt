@@ -116,6 +116,7 @@ fun AgentChatScreen(
   modelManagerViewModel: ModelManagerViewModel,
   navigateUp: () -> Unit,
   agentTools: AgentTools,
+  taskId: String = BuiltInTaskId.LLM_AGENT_CHAT,
   viewModel: LlmChatViewModel = hiltViewModel(),
   skillManagerViewModel: SkillManagerViewModel = hiltViewModel(),
 ) {
@@ -139,7 +140,7 @@ fun AgentChatScreen(
 
   LlmChatScreen(
     modelManagerViewModel = modelManagerViewModel,
-    taskId = BuiltInTaskId.LLM_AGENT_CHAT,
+    taskId = taskId,
     navigateUp = navigateUp,
     onFirstToken = { model ->
       updateProgressPanel(viewModel = viewModel, model = model, agentTools = agentTools)

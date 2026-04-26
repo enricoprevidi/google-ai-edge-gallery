@@ -64,6 +64,14 @@ import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material.icons.outlined.Email
+import androidx.compose.material.icons.outlined.Kitchen
+import androidx.compose.material.icons.outlined.LocalLibrary
+import androidx.compose.material.icons.outlined.Map
+import androidx.compose.material.icons.outlined.QrCode
+import androidx.compose.material.icons.outlined.ScreenRotation
+import androidx.compose.material.icons.outlined.SentimentVerySatisfied
+import androidx.compose.material.icons.outlined.Tag
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -113,6 +121,7 @@ import com.google.ai.edge.gallery.common.CallJsAgentAction
 import com.google.ai.edge.gallery.common.SkillProgressAgentAction
 import com.google.ai.edge.gallery.customtasks.agentchat.SkillManagerViewModel
 import com.google.ai.edge.gallery.customtasks.agentchat.SkillState
+import com.google.ai.edge.gallery.customtasks.agentchat.TRYOUT_CHIPS
 import com.google.ai.edge.gallery.data.ModelDownloadStatusType
 import com.google.ai.edge.gallery.data.Task
 import com.google.ai.edge.gallery.ui.common.BaseGalleryWebViewClient
@@ -142,18 +151,21 @@ fun OrchestratorScreen(
   orchestratorViewModel: OrchestratorViewModel = hiltViewModel(),
   skillManagerViewModel: SkillManagerViewModel = hiltViewModel(),
 ) {
-  // Wire up skillManagerViewModel before any LaunchedEffect triggers model init.
-  orchestratorTask.skillManagerViewModel = skillManagerViewModel
-
   val context = LocalContext.current
+
+  // Mirror AgentChatScreen: keep agentTools in sync on every recomposition so that
+  // skills work even if initializeModelFn ran before this composable was entered or
+  // when a new NavBackStackEntry gives us a fresh SkillManagerViewModel instance.
+  orchestratorTask.skillManagerViewModel = skillManagerViewModel
+  val agentTools = orchestratorTask.agentTools
+  agentTools.context = context
+  agentTools.skillManagerViewModel = skillManagerViewModel
 
   // ── WebView infrastructure for skill JS execution (mirrors AgentChatScreen) ──
   val chatWebViewClient = remember { OrchestratorWebViewClient(context) }
-  val chatViewJavascriptInterface = remember { OrchestratorWebViewJavascriptInterface() }
+  val chatViewJavascriptInterface = orchestratorChatViewJavascriptInterface
   var webViewRef: WebView? by remember { mutableStateOf(null) }
-  val agentTools = orchestratorTask.agentTools
-  if (agentTools != null) {
-    LaunchedEffect(agentTools.actionChannel) {
+  LaunchedEffect(agentTools.actionChannel) {
       for (action in agentTools.actionChannel) {
         when (action) {
           is CallJsAgentAction -> {
@@ -198,7 +210,6 @@ fun OrchestratorScreen(
         }
       }
     }
-  }
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
   val uiState by orchestratorViewModel.uiState.collectAsState()
   val skillUiState by skillManagerViewModel.uiState.collectAsState()
@@ -229,9 +240,6 @@ fun OrchestratorScreen(
   var showAddMenu by remember { mutableStateOf(false) }
 
   val listState = rememberLazyListState()
-
-  // Active skills — derive reactively from skillUiState so chips update automatically.
-  val activeSkills = skillUiState.skills.filter { it.skill.selected }.map { it.skill }
 
   // Auto-scroll to last message.
   LaunchedEffect(uiState.chatMessages.size, uiState.streamingResponse) {
@@ -452,16 +460,16 @@ fun OrchestratorScreen(
   // Wrap in a Box so the hidden WebView does not affect the Column layout.
   Box(modifier = Modifier.fillMaxSize()) {
     // Hidden 1dp WebView overlay — used to execute skill JavaScript without affecting layout.
-    if (agentTools != null) {
-      GalleryWebView(
-        modifier = Modifier.size(1.dp),
-        onWebViewCreated = { webView ->
-          webViewRef = webView
-          webView.addJavascriptInterface(chatViewJavascriptInterface, "AiEdgeGallery")
-        },
-        customWebViewClient = chatWebViewClient,
-      )
-    }
+    // Always created so the actionChannel LaunchedEffect above can always drive it,
+    // regardless of when PlannerTools is initialized.
+    GalleryWebView(
+      modifier = Modifier.size(300.dp),
+      onWebViewCreated = { webView ->
+        webViewRef = webView
+        webView.addJavascriptInterface(chatViewJavascriptInterface, "AiEdgeGallery")
+      },
+      customWebViewClient = chatWebViewClient,
+    )
 
   Column(
     modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).imePadding()
@@ -592,20 +600,22 @@ fun OrchestratorScreen(
           horizontalArrangement = Arrangement.spacedBy(6.dp),
           verticalAlignment = Alignment.CenterVertically,
         ) {
-          // Active skill chips — highlighted blue (primaryContainer).
-          for (skill in activeSkills) {
-            AssistChip(
-              onClick = {},
-              label = { Text(skill.name, fontSize = 11.sp) },
-              leadingIcon = {
-                Icon(Icons.Outlined.Extension, contentDescription = null, modifier = Modifier.size(14.dp))
-              },
-              colors = AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                labelColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                leadingIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-              ),
-            )
+          // Skill shortcut chips — clicking pre-fills the prompt (mirrors Agent Skills TRYOUT_CHIPS).
+          for (chip in TRYOUT_CHIPS) {
+            if (skillManagerViewModel.isSkillSelected(chip.skillName)) {
+              AssistChip(
+                onClick = { if (isInitialized && !uiState.isProcessing) inputText = chip.prompt },
+                label = { Text(chip.label, fontSize = 11.sp) },
+                leadingIcon = {
+                  Icon(chip.icon, contentDescription = null, modifier = Modifier.size(14.dp))
+                },
+                colors = AssistChipDefaults.assistChipColors(
+                  containerColor = MaterialTheme.colorScheme.primaryContainer,
+                  labelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                  leadingIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
+              )
+            }
           }
           // Agent-type chips — secondary color.
           for (agentType in AgentType.entries) {
@@ -908,6 +918,9 @@ class OrchestratorWebViewJavascriptInterface {
     onResultListener?.invoke(result)
   }
 }
+
+/** File-level singleton — mirrors AgentChatScreen so the same JS interface is always used. */
+private val orchestratorChatViewJavascriptInterface = OrchestratorWebViewJavascriptInterface()
 
 class OrchestratorWebViewClient(context: android.content.Context) : BaseGalleryWebViewClient(context) {
   private var onPageLoaded: (() -> Unit)? = null

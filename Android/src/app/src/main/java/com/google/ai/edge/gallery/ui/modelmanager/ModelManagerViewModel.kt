@@ -173,6 +173,7 @@ private val PREDEFINED_LLM_TASK_ORDER =
     BuiltInTaskId.LLM_ASK_AUDIO,
     BuiltInTaskId.LLM_CHAT,
     BuiltInTaskId.LLM_AGENT_CHAT,
+    BuiltInTaskId.LLM_AGENT_CHAT_V2,
     BuiltInTaskId.LLM_PROMPT_LAB,
     BuiltInTaskId.LLM_TINY_GARDEN,
     BuiltInTaskId.LLM_MOBILE_ACTIONS,
@@ -1025,6 +1026,18 @@ constructor(
           )
         }
 
+        // Mirror Agent Skills models into Multi-Agent Skills (same allowlist, different task).
+        val agentChatModels = curTasks.find { it.id == BuiltInTaskId.LLM_AGENT_CHAT }?.models ?: mutableListOf()
+        val agentChatV2Task = curTasks.find { it.id == BuiltInTaskId.LLM_AGENT_CHAT_V2 }
+        if (agentChatV2Task != null) {
+          for (model in agentChatModels) {
+            if (agentChatV2Task.models.none { it.name == model.name }) {
+              agentChatV2Task.models.add(model)
+            }
+          }
+          Log.d(TAG, "Mirrored ${agentChatV2Task.models.size} models to Multi-Agent Skills task.")
+        }
+
         // Process all tasks.
         processTasks()
 
@@ -1151,6 +1164,7 @@ constructor(
       tasks.get(key = BuiltInTaskId.LLM_CHAT)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_PROMPT_LAB)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_AGENT_CHAT)?.models?.add(model)
+      tasks.get(key = BuiltInTaskId.LLM_AGENT_CHAT_V2)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_ORCHESTRATOR)?.models?.add(model)
       if (model.llmSupportImage) {
         tasks.get(key = BuiltInTaskId.LLM_ASK_IMAGE)?.models?.add(model)
