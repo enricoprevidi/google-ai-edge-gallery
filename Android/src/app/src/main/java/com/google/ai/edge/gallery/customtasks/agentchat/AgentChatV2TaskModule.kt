@@ -19,8 +19,10 @@ package com.google.ai.edge.gallery.customtasks.agentchat
 import android.content.Context
 import androidx.compose.runtime.Composable
 import com.google.ai.edge.gallery.R
+import com.google.ai.edge.gallery.common.SkillProgressAgentAction
 import com.google.ai.edge.gallery.customtasks.common.CustomTask
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
+import com.google.ai.edge.gallery.customtasks.orchestrator.SkillCreatorTools
 import com.google.ai.edge.gallery.data.BuiltInTaskId
 import com.google.ai.edge.gallery.data.Category
 import com.google.ai.edge.gallery.data.Model
@@ -57,19 +59,40 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
       textInputPlaceHolderRes = R.string.text_input_placeholder_llm_chat,
       defaultSystemPrompt =
         """
-        You are an AI assistant that helps users by answering questions and completes tasks using skills. For EVERY new task or request or question, you MUST execute the following steps in exact order. You MUST NOT skip any steps.
+        You are an AI assistant that helps users by answering questions and completes tasks using skills.
 
-        CRITICAL RULE: You MUST execute all steps silently. Do NOT generate or output any internal thoughts, reasoning, explanations, or intermediate text at ANY step.
+        CRITICAL RULE: You MUST execute all steps silently. Do NOT output any internal thoughts, reasoning, or intermediate text at ANY step. Output ONLY the final result.
 
-        1. First, find the most relevant skill from the following list:
+        ── STEP 1: DECIDE WHAT TO DO ──────────────────────────────────────────────────────
+        Read the user message. Choose EXACTLY ONE branch below and follow it completely.
 
-        ___SKILLS___
+        BRANCH A — SKILL CREATION
+        Trigger: the user explicitly asks to create, add, teach, save, or build a new skill.
+        Action: call the appropriate tool immediately (no skill lookup first).
+          • Use `createTextSkill(name, skillMd)` for persona, role-play, or knowledge-injection skills.
+            - `name`: kebab-case (e.g. "pirate-coach")
+            - `skillMd`: the COMPLETE SKILL.md file as a single string, including frontmatter. Example:
+              "---\nname: pirate-coach\ndescription: Responds in pirate speak.\n---\n\nWhen the user asks anything, respond entirely in pirate speak."
+          • Use `createJsSkill(name, skillMd, indexHtmlContent)` for skills requiring JavaScript.
+            - `skillMd`: same format as above, body should instruct the LLM to call run_js.
+            - `indexHtmlContent`: full HTML file content. MUST define: window['ai_edge_gallery_get_result'] = async (data) => { ... }
+          • After the tool returns successfully, output ONLY: "Skill '<name>' has been created and is ready to use."
+          • If the tool returns an error, output ONLY the error message.
 
-        After this step you MUST go to next step. You MUST NOT use `run_intent` under any circumstances at this step.
+        BRANCH B — SKILL MANAGEMENT
+        Trigger: the user asks to list, show, or delete skills.
+          • To list skills: call `listAvailableSkills` and output the result as a plain list.
+          • To delete a skill: call `deleteCreatedSkill` with the exact skill name and confirm.
 
-        2. If a relevant skill exists, use the `load_skill` tool to read its instructions. You MUST NOT use `run_intent` under any circumstances at this step.
-
-        3. Follow the skill's instructions exactly to complete the task. You MUST NOT output any intermediate thoughts or status updates. No exceptions! Output ONLY the final result when successful. It should contain one-sentence summary of the action taken, and the final result of the skill.
+        BRANCH C — EXECUTE A SKILL
+        Trigger: anything else (a task, question, or action the user wants performed).
+        Steps (execute in order, silently):
+          1. Find the most relevant skill from the list below:
+             ___SKILLS___
+          2. If a relevant skill exists, call `load_skill` to read its instructions.
+          3. Follow the skill's instructions exactly to complete the task.
+             Output ONLY the final result: one-sentence summary + result. No intermediate text.
+          4. If no relevant skill exists, answer the question directly using your own knowledge.
         """
           .trimIndent(),
     )
@@ -81,6 +104,24 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
     onDone: (String) -> Unit,
   ) {
     agentTools.skillManagerViewModel.loadSkills {
+      // SkillCreatorTools shares the same SkillManagerViewModel as AgentTools so newly created
+      // skills become immediately available to load_skill / run_js in the same conversation.
+      val skillCreatorTools =
+        SkillCreatorTools(
+          context = context,
+          skillManagerViewModel = agentTools.skillManagerViewModel,
+          onSkillCreated = { skillName ->
+            agentTools.sendAction(
+              SkillProgressAgentAction(
+                label = "Created skill \"$skillName\"",
+                inProgress = false,
+                addItemTitle = "Created skill \"$skillName\"",
+                addItemDescription = "The skill has been imported and selected.",
+              )
+            )
+          },
+        )
+
       LlmChatModelHelper.initialize(
         context = context,
         model = model,
@@ -93,7 +134,7 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           } else {
             agentTools.skillManagerViewModel.getSystemPrompt(task.defaultSystemPrompt)
           },
-        tools = listOf(tool(agentTools)),
+        tools = listOf(tool(agentTools), tool(skillCreatorTools)),
         enableConversationConstrainedDecoding = true,
       )
     }

@@ -1,0 +1,21 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        ".\\gradlew": true,
+        "/^cmd /c \"gradlew\\.bat :app:compileDebugKotlin 2>&1\" \\| Select-String -Pattern \"error:\\|warning:\\|BUILD\" \\| Select-Object -First 50$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^Test-Path \"gradlew\\.bat\" ; Get-Location$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^cmd /c \"gradlew\\.bat :app:compileDebugKotlin 2>&1\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^& \"\\.\\\\gradlew\\.bat\" \":app:compileDebugKotlin\" 2>&1 \\| Select-String -Pattern \"error:\\|warning:\\|BUILD\" \\| Select-Object -First 50$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

@@ -46,6 +46,11 @@ class AgentTools() : ToolSet {
   var resultImageToShow: CallJsSkillResultImage? = null
   var resultWebviewToShow: CallJsSkillResultWebview? = null
 
+  /** Sends an action to the action channel from non-suspending contexts. */
+  fun sendAction(action: AgentAction) {
+    runBlocking(Dispatchers.Default) { _actionChannel.send(action) }
+  }
+
   /** Loads skill. */
   @Tool(description = "Loads a skill.")
   fun loadSkill(

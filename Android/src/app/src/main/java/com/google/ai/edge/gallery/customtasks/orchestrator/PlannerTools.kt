@@ -171,7 +171,9 @@ class PlannerTools(
           SkillCreatorTools(
             context = context,
             skillManagerViewModel = skillManagerViewModel,
-            onActionTaken = onActionTaken,
+            onSkillCreated = { name ->
+              onActionTaken(SkillCreatedAction(skillName = name))
+            },
           )
         val prompt =
           Contents.of(

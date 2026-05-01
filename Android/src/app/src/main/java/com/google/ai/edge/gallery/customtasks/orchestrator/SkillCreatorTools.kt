@@ -31,11 +31,15 @@ private const val MAX_JS_BYTES = 512_000
 /**
  * Specialist ToolSet that generates new skills (text-only or JavaScript) and immediately imports
  * them into the skill library via [SkillManagerViewModel].
+ *
+ * [onSkillCreated] is invoked with the new skill's name after a successful import. Hosts can wire
+ * it to whatever progress / action sink they use (orchestrator action stream, AgentTools channel,
+ * etc.) — this class itself doesn't depend on any specific event type.
  */
 class SkillCreatorTools(
   private val context: Context,
   private val skillManagerViewModel: SkillManagerViewModel,
-  private val onActionTaken: (OrchestratorAction) -> Unit,
+  private val onSkillCreated: (skillName: String) -> Unit = {},
 ) : ToolSet {
 
   @Tool(
@@ -49,21 +53,23 @@ class SkillCreatorTools(
         "Kebab-case skill name matching the folder naming convention (e.g. 'fitness-coach')."
     )
     name: String,
-    @ToolParam(description = "One-sentence description shown in the skill selector.") description: String,
-    @ToolParam(description = "Full skill instructions in Markdown (the body after the frontmatter).")
-    instructions: String,
+    @ToolParam(
+      description =
+        "Complete SKILL.md content including YAML frontmatter and body. " +
+          "Example: '---\\nname: fitness-coach\\ndescription: A personal fitness coach.\\n---\\n\\nWhen the user asks for a workout, provide a detailed plan.'"
+    )
+    skillMd: String,
   ): Map<String, String> {
     Log.d(TAG, "createTextSkill: $name")
     val safeName = sanitizeSkillName(name) ?: return mapOf("error" to "Invalid skill name: '$name'. Use kebab-case with letters, digits, and hyphens only.")
 
-    val mdContent = buildSkillMd(safeName, description, instructions)
-    if (mdContent.toByteArray().size > MAX_SKILL_MD_BYTES) {
+    if (skillMd.toByteArray().size > MAX_SKILL_MD_BYTES) {
       return mapOf("error" to "Skill content too large (max ${MAX_SKILL_MD_BYTES} bytes).")
     }
 
     return importSkill(
       name = safeName,
-      skillMdContent = mdContent,
+      skillMdContent = skillMd,
       extraFiles = emptyMap(),
     )
   }
@@ -79,12 +85,12 @@ class SkillCreatorTools(
       description = "Kebab-case skill name (e.g. 'fetch-jokes')."
     )
     name: String,
-    @ToolParam(description = "One-sentence description shown in the skill selector.") description: String,
     @ToolParam(
       description =
-        "Instructions block instructing the LLM to call run_js with specific parameters."
+        "Complete SKILL.md content including YAML frontmatter and body. " +
+          "Example: '---\\nname: fetch-jokes\\ndescription: Fetches random jokes.\\n---\\n\\nUse run_js to call the script.'"
     )
-    instructions: String,
+    skillMd: String,
     @ToolParam(
       description =
         "Full HTML content for scripts/index.html. " +
@@ -99,10 +105,13 @@ class SkillCreatorTools(
       return mapOf("error" to "index.html content too large (max ${MAX_JS_BYTES} bytes).")
     }
 
-    val mdContent = buildSkillMd(safeName, description, instructions)
+    if (skillMd.toByteArray().size > MAX_SKILL_MD_BYTES) {
+      return mapOf("error" to "skillMd content too large (max ${MAX_SKILL_MD_BYTES} bytes).")
+    }
+
     return importSkill(
       name = safeName,
-      skillMdContent = mdContent,
+      skillMdContent = skillMd,
       extraFiles = mapOf("scripts/index.html" to indexHtmlContent),
     )
   }
@@ -185,7 +194,7 @@ class SkillCreatorTools(
       val skillWithDir = proto.toBuilder().setImportDirName(importDirName).build()
 
       skillManagerViewModel.addSkill(skill = skillWithDir, addToDataStore = true)
-      onActionTaken(SkillCreatedAction(skillName = name))
+      onSkillCreated(name)
       Log.d(TAG, "Skill '$name' created and imported.")
 
       mapOf("result" to "success", "skillName" to name)
@@ -196,14 +205,13 @@ class SkillCreatorTools(
     }
   }
 
-  private fun buildSkillMd(name: String, description: String, instructions: String): String =
-    """---
-name: $name
-description: $description
----
-
-$instructions
-""".trimIndent()
+  private fun buildSkillMd(name: String, description: String): String =
+    """
+    ---
+    name: $name
+    description: $description
+    ---
+    """.trimIndent()
 
   /** Returns null if the name contains invalid characters. */
   private fun sanitizeSkillName(name: String): String? {
