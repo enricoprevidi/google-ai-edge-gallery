@@ -83,6 +83,7 @@ fun ModelPageAppBar(
   allowEditingSystemPrompt: Boolean = false,
   curSystemPrompt: String = "",
   onSystemPromptChanged: (String) -> Unit = {},
+  extraActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
 ) {
   var showConfigDialog by remember { mutableStateOf(false) }
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
@@ -143,6 +144,8 @@ fun ModelPageAppBar(
     },
     // The config button for the model (if existed).
     actions = {
+      // Caller-provided actions are rendered before the built-in config/reset buttons.
+      extraActions()
       val downloadSucceeded = curDownloadStatus?.status == ModelDownloadStatusType.SUCCEEDED
       val showConfigButton = model.configs.isNotEmpty() && downloadSucceeded
       val showResetSessionButton = canShowResetSessionButton && downloadSucceeded

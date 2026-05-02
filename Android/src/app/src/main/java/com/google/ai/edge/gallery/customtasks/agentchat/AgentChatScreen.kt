@@ -38,11 +38,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -167,6 +170,29 @@ fun AgentChatScreen(
     modelManagerViewModel = modelManagerViewModel,
     taskId = taskId,
     navigateUp = navigateUp,
+    extraTopBarActions = {
+      // Workspace selector button \u2014 only shown for the V2 (Multi-Agent Skills) task. The URI is
+      // shared with the Multi-Agent Orchestrator via the same SharedPreferences key.
+      if (taskId == BuiltInTaskId.LLM_AGENT_CHAT_V2) {
+        FilledTonalButton(
+          onClick = { workspacePicker.launch(null) },
+          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+          modifier = Modifier.height(32.dp),
+        ) {
+          Icon(
+            Icons.Outlined.Folder,
+            contentDescription = "Set workspace",
+            modifier = Modifier.size(16.dp),
+          )
+          Spacer(modifier = Modifier.width(4.dp))
+          Text(
+            if (workspaceUri.isEmpty()) "Workspace" else "Workspace \u2713",
+            fontSize = 12.sp,
+          )
+        }
+        Spacer(modifier = Modifier.width(4.dp))
+      }
+    },
     onFirstToken = { model ->
       updateProgressPanel(viewModel = viewModel, model = model, agentTools = agentTools)
     },
@@ -233,37 +259,6 @@ fun AgentChatScreen(
       }
     },
     composableBelowMessageList = { model ->
-      // Workspace selector pill (V2 only).
-      if (taskId == BuiltInTaskId.LLM_AGENT_CHAT_V2) {
-        val workspaceLabel =
-          if (workspaceUri.isEmpty()) "Workspace: not set"
-          else "Workspace: " + workspaceUri.substringAfterLast('/').substringAfterLast("%2F")
-        Row(
-          modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-          verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-          AssistChip(
-            onClick = { workspacePicker.launch(null) },
-            label = { Text(workspaceLabel, maxLines = 1) },
-            leadingIcon = {
-              Icon(
-                imageVector = ImageVector.vectorResource(R.drawable.skill),
-                contentDescription = null,
-                modifier = Modifier.size(AssistChipDefaults.IconSize),
-              )
-            },
-          )
-          if (workspaceUri.isNotEmpty()) {
-            Text(
-              "Tap to change",
-              style = MaterialTheme.typography.labelSmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-          }
-        }
-      }
-
       val actionChannel = agentTools.actionChannel
       val doneIcon = ImageVector.vectorResource(R.drawable.skill)
       // Use rememberUpdatedState to ensure that LaunchedEffect captures the
