@@ -46,27 +46,22 @@ class PlannerTools(
   private val onActionTaken: (OrchestratorAction) -> Unit,
 ) : ToolSet {
 
-  @Tool(
-    description =
-      "Returns the list of available specialist models in the pool, including their names " +
-        "and recommended use-cases. Call this before dispatching to pick the best model."
-  )
-  fun listSpecialistModels(): List<String> = agentModelPool.specialistRoster()
+  // NOTE: listSpecialistModels / listAvailableSkills were intentionally removed from the
+  // planner's tool surface to prevent small models (e.g. Gemma 3-4B IT) from looping on
+  // discovery calls. The roster is injected statically into the system prompt instead.
 
   @Tool(
     description =
       "Dispatches a sub-task to a specialized agent and returns the agent's response. " +
-        "Valid agent types: 'mobile_agent' (flashlight, contacts, calendar, email, map, WiFi), " +
+        "agentType: 'mobile_agent' (flashlight, contacts, calendar, email, map, WiFi, Morse), " +
         "'app_launcher' (list/launch apps, send intents), " +
-        "'workspace_agent' (read/write files in the workspace folder), " +
+        "'workspace_agent' (read/write/list files in the workspace folder), " +
         "'skill_creator' (generate and import new skills), " +
-        "'skill_agent' (execute installed skills like query-wikipedia, qr-code, calculate-hash via JavaScript). " +
-        "Use modelName to select the best specialist from the pool (use listSpecialistModels to discover options). " +
-        "Always use this tool rather than attempting to perform device actions directly."
+        "'skill_agent' (execute installed skills like query-wikipedia, qr-code via JavaScript)."
   )
   fun dispatchToAgent(
     @ToolParam(
-      description = "Agent to use: 'mobile_agent', 'app_launcher', 'workspace_agent', or 'skill_creator'."
+      description = "Agent to use: 'mobile_agent', 'app_launcher', 'workspace_agent', 'skill_creator', or 'skill_agent'."
     )
     agentType: String,
     @ToolParam(
@@ -75,9 +70,7 @@ class PlannerTools(
     )
     request: String,
     @ToolParam(
-      description =
-        "Name of the specialist model to use (from listSpecialistModels). " +
-          "Leave empty to let the system pick the default specialist."
+      description = "Always pass an empty string \"\". The runtime picks the specialist."
     )
     modelName: String = "",
   ): Map<String, String> {
@@ -90,15 +83,36 @@ class PlannerTools(
     Log.d(TAG, "dispatchToAgent: type=$type model='$modelName' request=${request.take(100)}")
 
     val (systemInstruction, tools) = buildSpecialistConfig(type)
+    val resolvedSpecialist =
+      if (modelName.isNotBlank()) modelName else (agentModelPool.specialistRoster().firstOrNull() ?: "default")
+    OrchestratorStatus.beginDispatch(
+      agentType = agentType,
+      specialistName = resolvedSpecialist,
+      request = request,
+    )
     val result =
-      agentModelPool.dispatchBlocking(
-        request = request,
-        preferredModelName = modelName,
-        systemInstruction = systemInstruction,
-        tools = tools,
-      )
+      try {
+        agentModelPool.dispatchBlocking(
+          request = request,
+          preferredModelName = modelName,
+          systemInstruction = systemInstruction,
+          tools = tools,
+        )
+      } catch (t: Throwable) {
+        Log.e(TAG, "dispatchBlocking threw", t)
+        OrchestratorStatus.addLog(agentType, "EXCEPTION: ${t.javaClass.simpleName}: ${t.message ?: "(no message)"}")
+        "Error: ${t.javaClass.simpleName}: ${t.message ?: "unknown failure"}"
+      }
+    OrchestratorStatus.endDispatch(agentType = agentType, resultPreview = result)
     onActionTaken(DispatchAction(agentType = type, request = request, result = result))
-    return mapOf("agent" to type.displayName, "model" to modelName, "result" to result)
+    return mapOf(
+      "agent" to type.displayName,
+      "model" to modelName,
+      "result" to result,
+      "status" to "completed",
+      "instruction_for_planner" to
+        "Sub-task completed. Reply to the user with a SHORT plain-text summary now. Do NOT call any more tools for this user request.",
+    )
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────
@@ -120,6 +134,8 @@ class PlannerTools(
               Content.Text("You are a mobile device control agent. $baseCtx"),
               Content.Text(
                 "Perform the requested device action using the available tools. " +
+                  "For repeated flashlight patterns (SOS, distress signals, Morse), call " +
+                  "flashMorseCode(text, unitMs) instead of toggling the flashlight in a loop. " +
                   "Return a brief confirmation of what was done."
               ),
             )

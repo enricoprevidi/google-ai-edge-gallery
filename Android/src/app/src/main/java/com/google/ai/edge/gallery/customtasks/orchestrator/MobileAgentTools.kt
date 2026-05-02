@@ -183,6 +183,73 @@ class MobileAgentTools(
 
   // ── helpers ──────────────────────────────────────────────────────────────
 
+  @Tool(
+    description =
+      "Flashes the device flashlight in Morse code for the given text. Each letter is encoded " +
+        "as dots and dashes with proper Morse timing (dot = unit, dash = 3 units, intra-letter " +
+        "gap = 1 unit, inter-letter gap = 3 units, inter-word gap = 7 units). Useful for SOS " +
+        "or any short signalling. Blocks until the entire pattern has finished playing."
+  )
+  fun flashMorseCode(
+    @ToolParam(
+      description =
+        "Plain text to signal (e.g. 'SOS', 'HELP'). Letters and digits supported; everything " +
+          "else is treated as a word separator."
+    )
+    text: String,
+    @ToolParam(
+      description =
+        "Length of one Morse 'unit' in milliseconds. Defaults to 200 (typical hand signalling " +
+          "speed). Lower = faster."
+    )
+    unitMs: Int = 200,
+  ): Map<String, String> {
+    Log.d(TAG, "flashMorseCode: text='$text' unit=${unitMs}ms")
+    val unit = unitMs.coerceIn(40, 1000).toLong()
+    val pattern = buildMorseSchedule(text, unit)
+    if (pattern.isEmpty()) {
+      return mapOf("error" to "No Morse-encodable characters in input.")
+    }
+    return try {
+      // Make sure the torch is off before we start so the first ON edge is visible.
+      setFlashlight(enabled = false)
+      for ((on, durationMs) in pattern) {
+        setFlashlight(enabled = on)
+        Thread.sleep(durationMs)
+      }
+      setFlashlight(enabled = false)
+      onActionTaken(OrchestratorMobileAction("Flashed Morse: \"$text\""))
+      mapOf("result" to "success", "morse" to text)
+    } catch (e: Exception) {
+      // Always make sure the torch ends OFF, even on failure.
+      runCatching { setFlashlight(enabled = false) }
+      mapOf("error" to (e.message ?: "Failed to flash Morse code"))
+    }
+  }
+
+  /**
+   * Returns a list of (torchOn, durationMs) steps that play [text] in Morse code.
+   * Standard timing: dot = 1 unit ON, dash = 3 units ON, gap between symbols of one letter =
+   * 1 unit OFF, gap between letters = 3 units OFF, gap between words = 7 units OFF.
+   */
+  private fun buildMorseSchedule(text: String, unit: Long): List<Pair<Boolean, Long>> {
+    val schedule = mutableListOf<Pair<Boolean, Long>>()
+    val words = text.uppercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    for ((wi, word) in words.withIndex()) {
+      for ((li, letter) in word.withIndex()) {
+        val code = MORSE_TABLE[letter] ?: continue
+        for ((si, symbol) in code.withIndex()) {
+          val onDuration = if (symbol == '.') unit else 3L * unit
+          schedule += true to onDuration
+          if (si != code.lastIndex) schedule += false to unit // intra-letter gap
+        }
+        if (li != word.lastIndex) schedule += false to 3L * unit // inter-letter gap
+      }
+      if (wi != words.lastIndex) schedule += false to 7L * unit // inter-word gap
+    }
+    return schedule
+  }
+
   private fun setFlashlight(enabled: Boolean): String {
     val mgr = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     return try {
@@ -198,5 +265,21 @@ class MobileAgentTools(
     } catch (e: Exception) {
       e.message ?: "Unknown flashlight error"
     }
+  }
+
+  companion object {
+    /** International Morse code table (letters + digits). */
+    private val MORSE_TABLE: Map<Char, String> =
+      mapOf(
+        'A' to ".-", 'B' to "-...", 'C' to "-.-.", 'D' to "-..", 'E' to ".",
+        'F' to "..-.", 'G' to "--.", 'H' to "....", 'I' to "..", 'J' to ".---",
+        'K' to "-.-", 'L' to ".-..", 'M' to "--", 'N' to "-.", 'O' to "---",
+        'P' to ".--.", 'Q' to "--.-", 'R' to ".-.", 'S' to "...", 'T' to "-",
+        'U' to "..-", 'V' to "...-", 'W' to ".--", 'X' to "-..-", 'Y' to "-.--",
+        'Z' to "--..",
+        '0' to "-----", '1' to ".----", '2' to "..---", '3' to "...--",
+        '4' to "....-", '5' to ".....", '6' to "-....", '7' to "--...",
+        '8' to "---..", '9' to "----.",
+      )
   }
 }

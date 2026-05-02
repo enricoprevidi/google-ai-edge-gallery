@@ -174,6 +174,7 @@ private val PREDEFINED_LLM_TASK_ORDER =
     BuiltInTaskId.LLM_CHAT,
     BuiltInTaskId.LLM_AGENT_CHAT,
     BuiltInTaskId.LLM_AGENT_CHAT_V2,
+    BuiltInTaskId.LLM_ORCHESTRATOR_V2,
     BuiltInTaskId.LLM_PROMPT_LAB,
     BuiltInTaskId.LLM_TINY_GARDEN,
     BuiltInTaskId.LLM_MOBILE_ACTIONS,
@@ -637,6 +638,7 @@ constructor(
         BuiltInTaskId.LLM_MOBILE_ACTIONS,
         BuiltInTaskId.LLM_AGENT_CHAT,
         BuiltInTaskId.LLM_ORCHESTRATOR,
+        BuiltInTaskId.LLM_ORCHESTRATOR_V2,
       )
     for (task in getTasksByIds(ids = setOfTasks)) {
       // Remove duplicated imported model if existed.
@@ -1047,6 +1049,23 @@ constructor(
           Log.d(TAG, "Mirrored ${agentChatV2Task.models.size} models to Multi-Agent Skills task.")
         }
 
+        // Mirror the same model set into Multi-Agent Orchestrator V2 so the planner +
+        // specialist pool has the same models available as Multi-Agent Skills.
+        val orchestratorV2Task = curTasks.find { it.id == BuiltInTaskId.LLM_ORCHESTRATOR_V2 }
+        if (orchestratorV2Task != null) {
+          val sourceModels =
+            curTasks.find { it.id == BuiltInTaskId.LLM_AGENT_CHAT_V2 }?.models ?: mutableListOf()
+          for (model in sourceModels) {
+            if (orchestratorV2Task.models.none { it.name == model.name }) {
+              orchestratorV2Task.models.add(model)
+            }
+          }
+          Log.d(
+            TAG,
+            "Mirrored ${orchestratorV2Task.models.size} models to Multi-Agent Orchestrator V2 task.",
+          )
+        }
+
         // Process all tasks.
         processTasks()
 
@@ -1175,6 +1194,7 @@ constructor(
       tasks.get(key = BuiltInTaskId.LLM_AGENT_CHAT)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_AGENT_CHAT_V2)?.models?.add(model)
       tasks.get(key = BuiltInTaskId.LLM_ORCHESTRATOR)?.models?.add(model)
+      tasks.get(key = BuiltInTaskId.LLM_ORCHESTRATOR_V2)?.models?.add(model)
       if (model.llmSupportImage) {
         tasks.get(key = BuiltInTaskId.LLM_ASK_IMAGE)?.models?.add(model)
       }

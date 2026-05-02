@@ -803,6 +803,14 @@ constructor(
     }
   }
 
+  /** Returns name/description for ALL installed skills (selected or not). */
+  fun getAllSkillsNamesAndDescriptions(): String {
+    return _uiState.value.skills.joinToString("\n") { state ->
+      val sel = if (state.skill.selected) " [selected]" else ""
+      "- ${state.skill.name}$sel: ${state.skill.description}"
+    }
+  }
+
   /**
    * Converts the content of a skill.md file to a [Skill] proto.
    *

@@ -38,22 +38,29 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -117,7 +124,7 @@ import org.json.JSONObject
 private const val TAG = "AGAgentChatScreen"
 private val chatViewJavascriptInterface = ChatWebViewJavascriptInterface()
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun AgentChatScreen(
   task: Task,
@@ -147,6 +154,10 @@ fun AgentChatScreen(
   var sendMessageTrigger by remember { mutableStateOf<SendMessageTrigger?>(null) }
   var showAlertForDisabledSkill by remember { mutableStateOf(false) }
   var disabledSkillName by remember { mutableStateOf("") }
+  // Specialist-models bottom sheet state — only meaningful for the V2 Orchestrator task.
+  var showSpecialistsSheet by remember { mutableStateOf(false) }
+  // Status bottom sheet (planner/specialist/RAM details) for the V2 Orchestrator.
+  var showStatusSheet by remember { mutableStateOf(false) }
 
   // Workspace selector state — only meaningful for the V2 (Multi-Agent Skills) task. The URI is
   // shared with the Multi-Agent Orchestrator via the same SharedPreferences key.
@@ -173,27 +184,54 @@ fun AgentChatScreen(
     modelManagerViewModel = modelManagerViewModel,
     taskId = taskId,
     navigateUp = navigateUp,
-    extraTopBarActions = {
-      // Workspace selector button \u2014 only shown for the V2 (Multi-Agent Skills) task. The URI is
-      // shared with the Multi-Agent Orchestrator via the same SharedPreferences key.
-      if (taskId == BuiltInTaskId.LLM_AGENT_CHAT_V2) {
-        FilledTonalButton(
-          onClick = { workspacePicker.launch(null) },
-          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-          modifier = Modifier.height(32.dp),
+    extraTopBarActions = {},
+    subTopBar = {
+      // Second row below the top app bar so the title has full width on the first row and
+      // these buttons get plenty of room on a second row.
+      if (
+        taskId == BuiltInTaskId.LLM_AGENT_CHAT_V2 ||
+          taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2
+      ) {
+        androidx.compose.foundation.layout.Row(
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+          horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+          verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         ) {
-          Icon(
-            Icons.Outlined.Folder,
-            contentDescription = "Set workspace",
-            modifier = Modifier.size(16.dp),
-          )
-          Spacer(modifier = Modifier.width(4.dp))
-          Text(
-            if (workspaceUri.isEmpty()) "Workspace" else "Workspace \u2713",
-            fontSize = 12.sp,
-          )
+          FilledTonalButton(
+            onClick = { workspacePicker.launch(null) },
+            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+            modifier = Modifier.height(32.dp),
+          ) {
+            Icon(
+              Icons.Outlined.Folder,
+              contentDescription = "Set workspace",
+              modifier = Modifier.size(16.dp),
+            )
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+              if (workspaceUri.isEmpty()) "Workspace" else "Workspace \u2713",
+              fontSize = 12.sp,
+            )
+          }
+          if (taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+            FilledTonalButton(
+              onClick = { showSpecialistsSheet = true },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+              modifier = Modifier.height(32.dp),
+            ) {
+              Icon(
+                Icons.Outlined.Hub,
+                contentDescription = "Specialist models",
+                modifier = Modifier.size(16.dp),
+              )
+              Spacer(modifier = Modifier.width(4.dp))
+              Text("Specialists", fontSize = 12.sp)
+            }
+            OrchestratorStatusChip(onClick = { showStatusSheet = true })
+          }
         }
-        Spacer(modifier = Modifier.width(4.dp))
       }
     },
     onFirstToken = { model ->
@@ -481,40 +519,116 @@ fun AgentChatScreen(
             Column(
               modifier =
                 Modifier.align(Alignment.Center)
-                  .padding(horizontal = 48.dp)
-                  .padding(bottom = 48.dp),
+                  .padding(horizontal = 32.dp)
+                  .padding(bottom = 48.dp)
+                  .verticalScroll(rememberScrollState()),
               horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-              Text(
-                stringResource(R.string.introducing),
-                style = MaterialTheme.typography.headlineSmall,
-              )
-              Text(
-                stringResource(R.string.agent_skills),
-                style =
-                  MaterialTheme.typography.headlineLarge.copy(
-                    fontWeight = FontWeight.Medium,
-                    brush =
-                      Brush.linearGradient(colors = listOf(Color(0xFF85B1F8), Color(0xFF3174F1))),
-                  ),
-                modifier = Modifier.padding(top = 12.dp, bottom = 16.dp),
-              )
-              Text(
-                buildAnnotatedString {
-                  append("Use specialized, high-order reasoning by loading different skills or ")
-                  append(
-                    buildTrackableUrlAnnotatedString(
-                      url = "https://github.com/google-ai-edge/gallery/tree/main/skills",
-                      linkText = "creating\u00A0your\u00A0own",
+              if (taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+                Text(
+                  "Multi-Agent Orchestrator",
+                  style =
+                    MaterialTheme.typography.headlineMedium.copy(
+                      fontWeight = FontWeight.Medium,
+                      brush =
+                        Brush.linearGradient(
+                          colors = listOf(Color(0xFF85B1F8), Color(0xFF3174F1))
+                        ),
+                    ),
+                  modifier = Modifier.padding(top = 4.dp, bottom = 12.dp),
+                  textAlign = TextAlign.Center,
+                )
+                Text(
+                  "The planner can act directly OR dispatch sub-tasks to specialist agents:",
+                  style =
+                    MaterialTheme.typography.bodyMedium.copy(
+                      fontSize = 14.sp,
+                      lineHeight = 20.sp,
+                    ),
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  textAlign = TextAlign.Center,
+                  modifier = Modifier.padding(bottom = 16.dp),
+                )
+                AgentDescription(
+                  title = "mobile_agent",
+                  body =
+                    "Flashlight (incl. flashMorseCode for SOS), contacts, calendar events, " +
+                      "email, SMS, maps, WiFi settings.",
+                )
+                AgentDescription(
+                  title = "app_launcher",
+                  body =
+                    "Lists installed apps, launches them, or sends structured intents " +
+                      "(e.g. share text, open URL).",
+                )
+                AgentDescription(
+                  title = "workspace_agent",
+                  body =
+                    "Reads, writes, lists, creates and deletes files in the chosen workspace " +
+                      "folder. Tap Workspace at the top to grant access.",
+                )
+                AgentDescription(
+                  title = "skill_creator",
+                  body =
+                    "Generates and imports new text or JavaScript skills on the fly. New skills " +
+                      "become immediately available to skill_agent.",
+                )
+                AgentDescription(
+                  title = "skill_agent",
+                  body =
+                    "Executes installed skills via JavaScript: query-wikipedia, qr-code, " +
+                      "calculate-hash, mood-tracker, restaurant-roulette, …",
+                )
+                Text(
+                  "Try: \"Flash SOS in Morse with the flashlight\" or " +
+                    "\"Look up Marie Curie on Wikipedia and add a contact for her\".",
+                  style =
+                    MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 18.sp),
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  textAlign = TextAlign.Center,
+                  modifier = Modifier.padding(top = 12.dp),
+                )
+              } else {
+                Text(
+                  stringResource(R.string.introducing),
+                  style = MaterialTheme.typography.headlineSmall,
+                )
+                Text(
+                  stringResource(R.string.agent_skills),
+                  style =
+                    MaterialTheme.typography.headlineLarge.copy(
+                      fontWeight = FontWeight.Medium,
+                      brush =
+                        Brush.linearGradient(
+                          colors = listOf(Color(0xFF85B1F8), Color(0xFF3174F1))
+                        ),
+                    ),
+                  modifier = Modifier.padding(top = 12.dp, bottom = 16.dp),
+                )
+                Text(
+                  buildAnnotatedString {
+                    append(
+                      "Use specialized, high-order reasoning by loading different skills or "
                     )
-                  )
-                  append(".\n\nTry tapping a sample prompt below to see Agent Skills in action!")
-                },
-                style =
-                  MaterialTheme.typography.headlineSmall.copy(fontSize = 16.sp, lineHeight = 22.sp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-              )
+                    append(
+                      buildTrackableUrlAnnotatedString(
+                        url = "https://github.com/google-ai-edge/gallery/tree/main/skills",
+                        linkText = "creating\u00A0your\u00A0own",
+                      )
+                    )
+                    append(
+                      ".\n\nTry tapping a sample prompt below to see Agent Skills in action!"
+                    )
+                  },
+                  style =
+                    MaterialTheme.typography.headlineSmall.copy(
+                      fontSize = 16.sp,
+                      lineHeight = 22.sp,
+                    ),
+                  color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  textAlign = TextAlign.Center,
+                )
+              }
             }
           }
         }
@@ -624,6 +738,335 @@ fun AgentChatScreen(
       },
     )
   }
+
+  // ── Specialist Models picker (V2 Orchestrator only) ─────────────────────────────
+  if (showSpecialistsSheet && taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
+    val currentModel = modelManagerUiState.selectedModel
+
+    val downloadedSpecialists =
+      task.models.filter { m ->
+        m.name != currentModel.name &&
+          modelManagerUiState.modelDownloadStatus[m.name]?.status ==
+            com.google.ai.edge.gallery.data.ModelDownloadStatusType.SUCCEEDED
+      }
+    val allDownloadedNames = downloadedSpecialists.map { it.name }.toSet()
+
+    val savedCsv = workspacePrefs.getString("v2_specialist_names", "") ?: ""
+    val savedSet = savedCsv.split(',').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    var tempSelected by remember {
+      mutableStateOf(if (savedSet.isEmpty()) allDownloadedNames else savedSet)
+    }
+
+    ModalBottomSheet(
+      onDismissRequest = { showSpecialistsSheet = false },
+      sheetState = sheetState,
+    ) {
+      Column(
+        modifier =
+          Modifier.fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        Text(
+          "Specialist Models",
+          style = MaterialTheme.typography.titleMedium,
+          fontWeight = FontWeight.Bold,
+        )
+        HorizontalDivider()
+        Text(
+          "Planner: ${currentModel.name}",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+          "Select which downloaded models are available as specialist agents in the model pool. " +
+            "All checked models will be offered to the planner via dispatchToAgent.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (downloadedSpecialists.isEmpty()) {
+          Text(
+            "No other models downloaded. The planner will use its own weights as the only specialist.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        } else {
+          for (m in downloadedSpecialists) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Checkbox(
+                checked = tempSelected.contains(m.name),
+                onCheckedChange = { checked ->
+                  tempSelected =
+                    if (checked) tempSelected + m.name else tempSelected - m.name
+                },
+              )
+              Text(m.name, style = MaterialTheme.typography.bodyMedium)
+            }
+          }
+        }
+        Button(
+          onClick = {
+            // Empty set = "all downloaded": store empty string so the V2 task uses everything.
+            val csv =
+              if (tempSelected == allDownloadedNames) "" else tempSelected.joinToString(",")
+            workspacePrefs.edit().putString("v2_specialist_names", csv).apply()
+            showSpecialistsSheet = false
+            modelManagerViewModel.initializeModel(context, task, currentModel, force = true)
+          },
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Text("Apply & Reinitialize")
+        }
+      }
+    }
+  }
+
+  // ── Live status sheet (V2 Orchestrator only) ────────────────────────────────────
+  if (showStatusSheet && taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+      onDismissRequest = { showStatusSheet = false },
+      sheetState = sheetState,
+    ) {
+      OrchestratorStatusPanel()
+    }
+  }
+}
+
+@Composable
+private fun AgentDescription(title: String, body: String) {
+  Column(
+    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+    horizontalAlignment = Alignment.Start,
+  ) {
+    Text(
+      title,
+      style = MaterialTheme.typography.labelLarge.copy(fontSize = 13.sp),
+      color = MaterialTheme.colorScheme.primary,
+    )
+    Text(
+      body,
+      style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 16.sp),
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
+/** Compact pill in the chat top bar showing live orchestrator status. Tapping opens details. */
+@Composable
+private fun OrchestratorStatusChip(onClick: () -> Unit) {
+  val context = LocalContext.current
+  val activeSpecialist by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.activeSpecialist
+      .collectAsState()
+
+  // Refresh RAM every 30 seconds.
+  var freeRamMb by remember { mutableStateOf(readFreeRamMb(context)) }
+  LaunchedEffect(Unit) {
+    while (true) {
+      freeRamMb = readFreeRamMb(context)
+      kotlinx.coroutines.delay(30_000L)
+    }
+  }
+
+  val busy = activeSpecialist != null
+  val label = if (busy) "● ${freeRamMb}M" else "○ ${freeRamMb}M"
+  FilledTonalButton(
+    onClick = onClick,
+    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+    modifier = Modifier.height(32.dp),
+  ) {
+    Text(label, fontSize = 11.sp)
+  }
+}
+
+/** Detailed status panel for the bottom sheet — planner / specialist / RAM / dispatch count. */
+@Composable
+private fun OrchestratorStatusPanel() {
+  val context = LocalContext.current
+  val plannerName by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.plannerName
+      .collectAsState()
+  val activeSpecialist by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.activeSpecialist
+      .collectAsState()
+  val lastActivity by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.lastActivity
+      .collectAsState()
+  val dispatchCount by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.dispatchCount
+      .collectAsState()
+  val models by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.models
+      .collectAsState()
+  val log by
+    com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.log
+      .collectAsState()
+
+  // RAM refreshed every 1.5s while the sheet is open so the user sees live values.
+  var memInfo by remember { mutableStateOf(readMemoryInfo(context)) }
+  LaunchedEffect(Unit) {
+    while (true) {
+      memInfo = readMemoryInfo(context)
+      kotlinx.coroutines.delay(1_500L)
+    }
+  }
+
+  Column(
+    modifier =
+      Modifier.fillMaxWidth()
+        .padding(horizontal = 20.dp)
+        .padding(bottom = 32.dp)
+        .verticalScroll(rememberScrollState()),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Text(
+      "Orchestrator status",
+      style = MaterialTheme.typography.titleMedium,
+      fontWeight = FontWeight.Bold,
+    )
+    HorizontalDivider()
+    StatusRow("Planner", if (plannerName.isEmpty()) "—" else plannerName)
+    StatusRow(
+      "State",
+      if (activeSpecialist != null) "Dispatching → ${activeSpecialist}" else "Idle",
+    )
+    StatusRow("Last activity", lastActivity)
+    StatusRow("Dispatches done", dispatchCount.toString())
+    HorizontalDivider()
+    StatusRow("Free RAM", "${memInfo.first} MB")
+    StatusRow("Total RAM", "${memInfo.second} MB")
+    StatusRow(
+      "Low memory",
+      if (memInfo.third) "YES — system is reclaiming" else "no",
+    )
+
+    HorizontalDivider()
+    Text(
+      "Models in RAM (${models.size})",
+      style = MaterialTheme.typography.titleSmall,
+      fontWeight = FontWeight.Bold,
+      modifier = Modifier.padding(top = 4.dp),
+    )
+    if (models.isEmpty()) {
+      Text(
+        "(no model loaded yet)",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    } else {
+      for (m in models) {
+        Column(
+          modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        ) {
+          Text(
+            "${m.name}  [${m.role}]" + if (m.sharedWithPlanner) "  · shared engine" else "",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+          )
+          for (t in m.tools) {
+            Text(
+              "  • $t",
+              style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+      }
+    }
+
+    HorizontalDivider()
+    Text(
+      "Orchestration log (${log.size})",
+      style = MaterialTheme.typography.titleSmall,
+      fontWeight = FontWeight.Bold,
+      modifier = Modifier.padding(top = 4.dp),
+    )
+    if (log.isEmpty()) {
+      Text(
+        "(empty — perform an action to see entries)",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    } else {
+      val timeFmt = remember { java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US) }
+      for (entry in log.takeLast(80)) {
+        val tone = when (entry.source) {
+          "planner" -> MaterialTheme.colorScheme.primary
+          "system" -> MaterialTheme.colorScheme.onSurfaceVariant
+          else -> MaterialTheme.colorScheme.tertiary
+        }
+        Row(modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+          Text(
+            timeFmt.format(java.util.Date(entry.timestamp)),
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(60.dp),
+          )
+          Text(
+            "${entry.source}: ",
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+            color = tone,
+            fontWeight = FontWeight.Medium,
+          )
+          Text(
+            entry.message,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+          )
+        }
+      }
+    }
+
+    Text(
+      "RAM refreshes every 1.5s while this panel is open. The compact chip in the top bar " +
+        "refreshes every 30s.",
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.padding(top = 8.dp),
+    )
+  }
+}
+
+@Composable
+private fun StatusRow(label: String, value: String) {
+  Row(modifier = Modifier.fillMaxWidth()) {
+    Text(
+      "$label:",
+      modifier = Modifier.width(120.dp),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+  }
+}
+
+private fun readFreeRamMb(context: Context): Long {
+  val am =
+    context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+      ?: return -1L
+  val info = android.app.ActivityManager.MemoryInfo()
+  am.getMemoryInfo(info)
+  return info.availMem / (1024L * 1024L)
+}
+
+/** @return Triple(freeMb, totalMb, lowMemory). */
+private fun readMemoryInfo(context: Context): Triple<Long, Long, Boolean> {
+  val am =
+    context.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+      ?: return Triple(-1L, -1L, false)
+  val info = android.app.ActivityManager.MemoryInfo()
+  am.getMemoryInfo(info)
+  return Triple(
+    info.availMem / (1024L * 1024L),
+    info.totalMem / (1024L * 1024L),
+    info.lowMemory,
+  )
 }
 
 private fun updateProgressPanel(viewModel: LlmChatViewModel, model: Model, agentTools: AgentTools) {

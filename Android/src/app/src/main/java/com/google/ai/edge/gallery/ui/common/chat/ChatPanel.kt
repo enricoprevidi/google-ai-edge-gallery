@@ -578,7 +578,7 @@ fun ChatPanel(
         onPickedImagesChanged = { pickedImagesCount = it.size },
         onPickedAudioClipsChanged = { pickedAudioClipsCount = it.size },
         showPromptTemplatesInMenu = false,
-        showSkillsPicker = task.id == BuiltInTaskId.LLM_AGENT_CHAT || task.id == BuiltInTaskId.LLM_AGENT_CHAT_V2,
+        showSkillsPicker = task.id == BuiltInTaskId.LLM_AGENT_CHAT || task.id == BuiltInTaskId.LLM_AGENT_CHAT_V2 || task.id == BuiltInTaskId.LLM_ORCHESTRATOR_V2,
         showImagePicker = selectedModel.llmSupportImage && showImagePicker,
         showAudioPicker = selectedModel.llmSupportAudio && showAudioPicker,
         showStopButtonWhenInProgress = showStopButtonInInputWhenInProgress,

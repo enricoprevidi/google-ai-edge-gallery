@@ -74,6 +74,10 @@ class AgentModelPool(
 ) {
   /** Serializes access to the planner's Engine when a shared specialist is dispatched. */
   private val plannerEngineMutex = Mutex()
+
+  /** Cached planner config so a shared-engine dispatch can re-create the planner conversation. */
+  private var cachedPlannerSystemPrompt: Contents? = null
+  private var cachedPlannerTools: List<ToolProvider> = emptyList()
   /**
    * Initializes the planner and ALL specialist models concurrently.
    *
@@ -88,6 +92,8 @@ class AgentModelPool(
     plannerTools: List<ToolProvider>,
     onDone: (String) -> Unit,
   ) {
+    cachedPlannerSystemPrompt = plannerSystemPrompt
+    cachedPlannerTools = plannerTools
     // total = planner + independent specialists only (shared ones reuse the planner Engine)
     val total = 1 + specialists.values.count { !it.sharedWithPlanner }
     val completedCount = AtomicInteger(0)
@@ -106,6 +112,7 @@ class AgentModelPool(
       supportAudio = false,
       systemInstruction = plannerSystemPrompt,
       tools = plannerTools,
+      enableConversationConstrainedDecoding = true,
       onDone = { error ->
         Log.d(TAG, "Planner ready. error='$error'")
         checkDone(error)
@@ -176,67 +183,122 @@ class AgentModelPool(
     systemInstruction: Contents,
     tools: List<ToolProvider>,
   ): String {
-    val entry = specialists[preferredModelName]
-      ?: specialists.values.firstOrNull()
-      ?: return "Error: no specialist models available in the pool."
+    // Tolerant lookup: small planners often hallucinate the verbose roster description into
+    // modelName. Match by exact key first, then by substring (any specialist whose name appears
+    // inside the requested string), then fall back to the first specialist.
+    val entry = run {
+      specialists[preferredModelName]?.let { return@run it }
+      if (preferredModelName.isNotBlank()) {
+        val match = specialists.entries.firstOrNull { (k, _) -> preferredModelName.contains(k) }
+        if (match != null) return@run match.value
+      }
+      specialists.values.firstOrNull()
+    } ?: run {
+      OrchestratorStatus.addLog("system", "dispatchBlocking: no specialists available")
+      return "Error: no specialist models available in the pool."
+    }
+    OrchestratorStatus.addLog(
+      "system",
+      "dispatch \u2192 ${entry.model.name} (sharedEngine=${entry.sharedWithPlanner})",
+    )
 
     return if (entry.sharedWithPlanner) {
-      // --- Shared-engine path: borrow planner Engine, save and restore planner conversation ---
+      // --- Shared-engine path: borrow planner Engine. The litertlm engine only allows ONE
+      // conversation at a time, so we MUST close the planner's conversation before creating the
+      // specialist conversation, then re-create the planner conversation afterwards from the
+      // cached planner config (system prompt + tools). The planner's per-turn history is reset
+      // — acceptable here because the planner is a stateless router for each user turn.
       Log.d(TAG, "Dispatching to shared specialist '${entry.model.name}' (planner Engine)")
       runBlocking {
         plannerEngineMutex.withLock {
           val plannerInstance = plannerModel.instance as? LlmModelInstance
             ?: return@withLock "Error: planner model not initialized."
 
-          // Save the planner's conversation — we must NOT close it.
-          val savedPlannerConversation = plannerInstance.conversation
+          // Close planner conversation so the engine accepts a new one.
+          try {
+            plannerInstance.conversation.close()
+          } catch (e: Exception) {
+            Log.w(TAG, "Closing planner conversation before specialist dispatch failed", e)
+          }
 
           val accelerator = plannerModel.getStringConfigValue(
             key = ConfigKeys.ACCELERATOR,
             defaultValue = Accelerator.GPU.label,
           )
-          val specialistConv = plannerInstance.engine.createConversation(
-            ConversationConfig(
-              samplerConfig =
-                if (accelerator == Accelerator.NPU.label || accelerator == Accelerator.TPU.label) {
-                  null
-                } else {
-                  SamplerConfig(
-                    topK = plannerModel.getIntConfigValue(
-                      key = ConfigKeys.TOPK,
-                      defaultValue = DEFAULT_TOPK,
-                    ),
-                    topP = plannerModel.getFloatConfigValue(
-                      key = ConfigKeys.TOPP,
-                      defaultValue = DEFAULT_TOPP,
-                    ).toDouble(),
-                    temperature = plannerModel.getFloatConfigValue(
-                      key = ConfigKeys.TEMPERATURE,
-                      defaultValue = DEFAULT_TEMPERATURE,
-                    ).toDouble(),
-                  )
-                },
-              systemInstruction = systemInstruction,
-              tools = tools,
-            )
-          )
-          // Swap in the specialist conversation temporarily.
+          val samplerCfg =
+            if (accelerator == Accelerator.NPU.label || accelerator == Accelerator.TPU.label) {
+              null
+            } else {
+              SamplerConfig(
+                topK = plannerModel.getIntConfigValue(
+                  key = ConfigKeys.TOPK,
+                  defaultValue = DEFAULT_TOPK,
+                ),
+                topP = plannerModel.getFloatConfigValue(
+                  key = ConfigKeys.TOPP,
+                  defaultValue = DEFAULT_TOPP,
+                ).toDouble(),
+                temperature = plannerModel.getFloatConfigValue(
+                  key = ConfigKeys.TEMPERATURE,
+                  defaultValue = DEFAULT_TEMPERATURE,
+                ).toDouble(),
+              )
+            }
+
+          val specialistConv = run {
+            com.google.ai.edge.litertlm.ExperimentalFlags.enableConversationConstrainedDecoding = true
+            try {
+              plannerInstance.engine.createConversation(
+                ConversationConfig(
+                  samplerConfig = samplerCfg,
+                  systemInstruction = systemInstruction,
+                  tools = tools,
+                )
+              )
+            } finally {
+              com.google.ai.edge.litertlm.ExperimentalFlags.enableConversationConstrainedDecoding = false
+            }
+          }
           plannerInstance.conversation = specialistConv
 
           val result = StringBuilder()
           try {
             val contents = Contents.of(listOf(Content.Text(request)))
+            OrchestratorStatus.addLog(entry.model.name, "inference start (shared engine)")
             specialistConv.sendMessageAsync(contents)
               .collect { message -> result.append(message.toString()) }
             Log.d(TAG, "Shared dispatch done ('${entry.model.name}'). Length: ${result.length}")
+            OrchestratorStatus.addLog(entry.model.name, "inference done (${result.length} chars)")
           } catch (e: Exception) {
             Log.e(TAG, "Shared specialist inference error", e)
+            OrchestratorStatus.addLog(entry.model.name, "inference EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
             result.append("Error during specialist inference: ${e.message}")
           } finally {
-            specialistConv.close()
-            // Restore the planner's conversation so its history is preserved.
-            plannerInstance.conversation = savedPlannerConversation
-            Log.d(TAG, "Planner conversation restored after shared dispatch.")
+            try {
+              specialistConv.close()
+            } catch (e: Exception) {
+              Log.w(TAG, "Closing specialist conversation failed", e)
+            }
+            // Re-create the planner conversation from cached config so subsequent planner
+            // turns work. History from prior planner turns is lost — acceptable because each
+            // user turn re-prompts the planner and dispatches once.
+            try {
+              com.google.ai.edge.litertlm.ExperimentalFlags.enableConversationConstrainedDecoding = true
+              val newPlannerConv = plannerInstance.engine.createConversation(
+                ConversationConfig(
+                  samplerConfig = samplerCfg,
+                  systemInstruction = cachedPlannerSystemPrompt,
+                  tools = cachedPlannerTools,
+                )
+              )
+              plannerInstance.conversation = newPlannerConv
+            } catch (e: Exception) {
+              Log.e(TAG, "Failed to recreate planner conversation", e)
+              OrchestratorStatus.addLog("system", "Failed to recreate planner conversation: ${e.message}")
+            } finally {
+              com.google.ai.edge.litertlm.ExperimentalFlags.enableConversationConstrainedDecoding = false
+            }
+            Log.d(TAG, "Planner conversation recreated after shared dispatch.")
           }
           result.toString()
         }
@@ -260,7 +322,7 @@ class AgentModelPool(
             supportAudio = false,
             systemInstruction = systemInstruction,
             tools = tools,
-            enableConversationConstrainedDecoding = false,
+            enableConversationConstrainedDecoding = true,
           )
 
           val updatedInstance = targetModel.instance as? LlmModelInstance
@@ -269,15 +331,18 @@ class AgentModelPool(
           val contents = Contents.of(listOf(Content.Text(request)))
           val result = StringBuilder()
           try {
+            OrchestratorStatus.addLog(entry.model.name, "inference start (own engine)")
             updatedInstance.conversation
               .sendMessageAsync(contents)
               .collect { message -> result.append(message.toString()) }
           } catch (e: Exception) {
             Log.e(TAG, "Specialist inference error", e)
+            OrchestratorStatus.addLog(entry.model.name, "inference EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
             return@withLock "Error during specialist inference: ${e.message}"
           }
 
           Log.d(TAG, "Dispatch done ('${entry.model.name}'). Response length: ${result.length}")
+          OrchestratorStatus.addLog(entry.model.name, "inference done (${result.length} chars)")
           result.toString()
         }
       }

@@ -110,6 +110,7 @@ fun ChatView(
   onSystemPromptChanged: (String) -> Unit = {},
   sendMessageTrigger: SendMessageTrigger? = null,
   extraTopBarActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+  subTopBar: @Composable () -> Unit = {},
 ) {
   val uiState by viewModel.uiState.collectAsState()
   val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
@@ -165,6 +166,7 @@ fun ChatView(
   Scaffold(
     modifier = modifier,
     topBar = {
+      androidx.compose.foundation.layout.Column {
       ModelPageAppBar(
         task = task,
         model = selectedModel,
@@ -202,6 +204,8 @@ fun ChatView(
         onSystemPromptChanged = onSystemPromptChanged,
         extraActions = extraTopBarActions,
       )
+      subTopBar()
+      }
     },
   ) { innerPadding ->
     Box {

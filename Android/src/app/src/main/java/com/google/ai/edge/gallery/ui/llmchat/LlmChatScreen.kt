@@ -75,6 +75,7 @@ fun LlmChatScreen(
   showAudioPicker: Boolean = false,
   getActiveSkills: () -> List<String> = { emptyList() },
   extraTopBarActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+  subTopBar: @Composable () -> Unit = {},
 ) {
   ChatViewWrapper(
     viewModel = viewModel,
@@ -96,6 +97,7 @@ fun LlmChatScreen(
     showAudioPicker = showAudioPicker,
     getActiveSkills = getActiveSkills,
     extraTopBarActions = extraTopBarActions,
+    subTopBar = subTopBar,
   )
 }
 
@@ -195,6 +197,7 @@ fun ChatViewWrapper(
   showAudioPicker: Boolean = false,
   getActiveSkills: () -> List<String> = { emptyList() },
   extraTopBarActions: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
+  subTopBar: @Composable () -> Unit = {},
 ) {
   val context = LocalContext.current
   val task = modelManagerViewModel.getTaskById(id = taskId)!!
@@ -310,5 +313,6 @@ fun ChatViewWrapper(
     sendMessageTrigger = sendMessageTrigger,
     showAudioPicker = showAudioPicker,
     extraTopBarActions = extraTopBarActions,
+    subTopBar = subTopBar,
   )
 }
