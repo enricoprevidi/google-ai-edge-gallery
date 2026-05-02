@@ -16,7 +16,9 @@
 package com.google.ai.edge.gallery.customtasks.orchestrator
 
 import android.content.Context
+import android.net.Uri
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import com.google.ai.edge.gallery.customtasks.agentchat.SkillManagerViewModel
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
@@ -40,6 +42,13 @@ class SkillCreatorTools(
   private val context: Context,
   private val skillManagerViewModel: SkillManagerViewModel,
   private val onSkillCreated: (skillName: String) -> Unit = {},
+  /**
+   * Optional provider returning the SAF workspace tree URI. When set, every newly created skill
+   * is also written to `<workspace>/<skill-name>/` so the user can see, edit, or version-control
+   * the skill files. The runtime copy in `filesDir/skills/<name>/` is still required for the
+   * local URL server that backs `run_js`.
+   */
+  private val workspaceUriProvider: () -> String? = { null },
 ) : ToolSet {
 
   @Tool(
@@ -194,10 +203,19 @@ class SkillCreatorTools(
       val skillWithDir = proto.toBuilder().setImportDirName(importDirName).build()
 
       skillManagerViewModel.addSkill(skill = skillWithDir, addToDataStore = true)
-      onSkillCreated(name)
-      Log.d(TAG, "Skill '$name' created and imported.")
 
-      mapOf("result" to "success", "skillName" to name)
+      // Mirror to workspace if one is configured. Failure here should not abort the import
+      // — the skill is already runnable from filesDir; the workspace copy is a bonus for the
+      // user.
+      val workspaceMirrorPath = mirrorToWorkspace(name, skillMdContent, extraFiles)
+
+      onSkillCreated(name)
+      Log.d(TAG, "Skill '$name' created and imported." +
+          (workspaceMirrorPath?.let { " Mirrored to workspace: $it" } ?: ""))
+
+      val resultMap = mutableMapOf("result" to "success", "skillName" to name)
+      if (workspaceMirrorPath != null) resultMap["workspacePath"] = workspaceMirrorPath
+      resultMap
     } catch (e: Exception) {
       Log.e(TAG, "Failed to create skill '$name'", e)
       destDir.deleteRecursively()
@@ -217,5 +235,52 @@ class SkillCreatorTools(
   private fun sanitizeSkillName(name: String): String? {
     val trimmed = name.trim().lowercase()
     return if (trimmed.matches(Regex("[a-z0-9][a-z0-9-]*"))) trimmed else null
+  }
+
+  /**
+   * Mirrors a freshly created skill to `<workspace>/<name>/` via SAF. Returns the relative
+   * path written, or null if no workspace is configured / mirroring failed.
+   */
+  private fun mirrorToWorkspace(
+    name: String,
+    skillMdContent: String,
+    extraFiles: Map<String, String>,
+  ): String? {
+    val workspaceUri = workspaceUriProvider()?.takeIf { it.isNotEmpty() } ?: return null
+    return try {
+      val root =
+        DocumentFile.fromTreeUri(context, Uri.parse(workspaceUri)) ?: return null
+      val skillDir = root.findFile(name) ?: root.createDirectory(name) ?: return null
+      writeWorkspaceFile(skillDir, "SKILL.md", skillMdContent)
+      for ((relativePath, content) in extraFiles) {
+        val parts = relativePath.split("/").filter { it.isNotEmpty() }
+        if (parts.isEmpty()) continue
+        val fileName = parts.last()
+        val parentDir = parts.dropLast(1).fold(skillDir as DocumentFile?) { cur, seg ->
+          cur?.findFile(seg) ?: cur?.createDirectory(seg)
+        } ?: continue
+        writeWorkspaceFile(parentDir, fileName, content)
+      }
+      name
+    } catch (e: Exception) {
+      Log.w(TAG, "Failed to mirror skill '$name' to workspace", e)
+      null
+    }
+  }
+
+  private fun writeWorkspaceFile(parent: DocumentFile, fileName: String, content: String) {
+    val existing = parent.findFile(fileName)
+    val target =
+      if (existing != null && existing.isFile) existing
+      else {
+        // Use application/octet-stream so SAF doesn't append a canonical extension
+        // matching a "friendlier" MIME (e.g. createFile("text/plain", "SKILL.md") would
+        // produce "SKILL.md.txt" on the default Files provider). octet-stream has no
+        // canonical extension, so the displayName is preserved verbatim.
+        parent.createFile("application/octet-stream", fileName) ?: return
+      }
+    context.contentResolver.openOutputStream(target.uri, "wt")?.bufferedWriter()?.use {
+      it.write(content)
+    }
   }
 }

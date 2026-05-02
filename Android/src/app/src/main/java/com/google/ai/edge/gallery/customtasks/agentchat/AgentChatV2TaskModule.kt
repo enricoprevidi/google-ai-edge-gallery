@@ -130,8 +130,18 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
     onDone: (String) -> Unit,
   ) {
     agentTools.skillManagerViewModel.loadSkills {
+      // Shared workspace URI provider: SkillCreatorTools mirrors created skills here, and
+      // WorkspaceTools reads/writes from the same SAF root.
+      val workspacePrefs =
+        context.getSharedPreferences("orchestrator_prefs", Context.MODE_PRIVATE)
+      val workspaceUriProvider: () -> String? = {
+        workspacePrefs.getString("workspace_uri", null)?.takeIf { it.isNotEmpty() }
+      }
+
       // SkillCreatorTools shares the same SkillManagerViewModel as AgentTools so newly created
       // skills become immediately available to load_skill / run_js in the same conversation.
+      // When a workspace folder is selected, each created skill is also mirrored to
+      // <workspace>/<skill-name>/ so the user can inspect / edit the source files.
       val skillCreatorTools =
         SkillCreatorTools(
           context = context,
@@ -146,20 +156,17 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
               )
             )
           },
+          workspaceUriProvider = workspaceUriProvider,
         )
 
       // WorkspaceTools reads the SAF folder URI persisted by OrchestratorViewModel so the user
       // only has to grant access once (via the Multi-Agent Orchestrator screen or the workspace
       // selector inside this screen). The lambda is called on every tool invocation, so changing
       // the workspace from the UI takes effect immediately without resetting the session.
-      val workspacePrefs =
-        context.getSharedPreferences("orchestrator_prefs", Context.MODE_PRIVATE)
       val workspaceTools =
         WorkspaceTools(
           context = context,
-          workspaceUriProvider = {
-            workspacePrefs.getString("workspace_uri", null)?.takeIf { it.isNotEmpty() }
-          },
+          workspaceUriProvider = workspaceUriProvider,
           onFileRead = { path ->
             agentTools.sendAction(
               SkillProgressAgentAction(
