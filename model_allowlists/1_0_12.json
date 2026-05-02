@@ -199,7 +199,8 @@
         "accelerators": "cpu"
       },
       "taskTypes": [
-        "llm_mobile_actions"
+        "llm_mobile_actions",
+        "llm_agent_chat_v2"
       ],
       "bestForTaskTypes": [
         "llm_mobile_actions"

@@ -18,6 +18,7 @@ package com.google.ai.edge.gallery.customtasks.agentchat
 import android.content.Context
 import android.util.Log
 import com.google.ai.edge.gallery.common.AgentAction
+import com.google.ai.edge.gallery.common.AgentActionName
 import com.google.ai.edge.gallery.common.AskInfoAgentAction
 import com.google.ai.edge.gallery.common.CallJsAgentAction
 import com.google.ai.edge.gallery.common.CallJsSkillResult
@@ -25,6 +26,8 @@ import com.google.ai.edge.gallery.common.CallJsSkillResultImage
 import com.google.ai.edge.gallery.common.CallJsSkillResultWebview
 import com.google.ai.edge.gallery.common.LOCAL_URL_BASE
 import com.google.ai.edge.gallery.common.SkillProgressAgentAction
+import com.google.ai.edge.gallery.customtasks.mobileactions.Action as MobileAction
+import com.google.ai.edge.gallery.customtasks.mobileactions.MobileActionsViewModel
 import com.google.ai.edge.litertlm.Tool
 import com.google.ai.edge.litertlm.ToolParam
 import com.google.ai.edge.litertlm.ToolSet
@@ -37,9 +40,18 @@ import kotlinx.coroutines.runBlocking
 
 private const val TAG = "AGAgentTools"
 
+/**
+ * Action emitted when a Mobile Actions tool was invoked by the model. The chat screen observes
+ * this and asks [MobileActionsViewModel.performAction] to execute the device-side intent.
+ */
+class MobileActionAgentAction(val action: MobileAction) :
+  AgentAction(name = AgentActionName.MOBILE_ACTION)
+
 class AgentTools() : ToolSet {
   lateinit var context: Context
   lateinit var skillManagerViewModel: SkillManagerViewModel
+  /** Set by the screen for tasks (e.g. Multi-Agent Skills) that wire MobileActionsTools. */
+  var mobileActionsViewModel: MobileActionsViewModel? = null
 
   private val _actionChannel = Channel<AgentAction>(Channel.UNLIMITED)
   val actionChannel: ReceiveChannel<AgentAction> = _actionChannel

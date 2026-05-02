@@ -84,6 +84,7 @@ import com.google.ai.edge.gallery.common.AskInfoAgentAction
 import com.google.ai.edge.gallery.common.CallJsAgentAction
 import com.google.ai.edge.gallery.common.LOCAL_URL_BASE
 import com.google.ai.edge.gallery.common.SkillProgressAgentAction
+import com.google.ai.edge.gallery.customtasks.mobileactions.MobileActionsViewModel
 import com.google.ai.edge.gallery.data.BuiltInTaskId
 import com.google.ai.edge.gallery.data.Model
 import com.google.ai.edge.gallery.data.Task
@@ -126,10 +127,12 @@ fun AgentChatScreen(
   taskId: String = BuiltInTaskId.LLM_AGENT_CHAT,
   viewModel: LlmChatViewModel = hiltViewModel(),
   skillManagerViewModel: SkillManagerViewModel = hiltViewModel(),
+  mobileActionsViewModel: MobileActionsViewModel = hiltViewModel(),
 ) {
   val context = LocalContext.current
   agentTools.context = context
   agentTools.skillManagerViewModel = skillManagerViewModel
+  agentTools.mobileActionsViewModel = mobileActionsViewModel
   val density = LocalDensity.current
   val windowInfo = LocalWindowInfo.current
   val screenWidthDp = remember { with(density) { windowInfo.containerSize.width.toDp() } }
@@ -386,6 +389,24 @@ fun AgentChatScreen(
               currentAskInfoAction = action
               askInfoInputValue = "" // Reset input
               showAskInfoDialog = true
+            }
+            is MobileActionAgentAction -> {
+              val details = action.action.functionCallDetails
+              val paramsDesc =
+                if (details.parameters.isEmpty()) ""
+                else details.parameters.joinToString(", ") { "${it.first}=${it.second}" }
+              viewModel.updateCollapsableProgressPanelMessage(
+                model = currentModel,
+                title = "Mobile action: ${details.functionName}",
+                inProgress = false,
+                doneIcon = action.action.icon,
+                addItemTitle = details.functionName,
+                addItemDescription = paramsDesc,
+              )
+              val error = mobileActionsViewModel.performAction(action.action, context)
+              if (error.isNotEmpty()) {
+                Log.e(TAG, "Mobile action error: $error")
+              }
             }
           }
         }

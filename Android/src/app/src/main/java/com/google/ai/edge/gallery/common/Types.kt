@@ -58,6 +58,7 @@ enum class AgentActionName() {
   CALL_JS_SKILL,
   SKILL_PROGRESS,
   ASK_INFO,
+  MOBILE_ACTION,
 }
 
 data class SkillTryOutChip(

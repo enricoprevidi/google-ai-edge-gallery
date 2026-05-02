@@ -22,6 +22,7 @@ import com.google.ai.edge.gallery.R
 import com.google.ai.edge.gallery.common.SkillProgressAgentAction
 import com.google.ai.edge.gallery.customtasks.common.CustomTask
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
+import com.google.ai.edge.gallery.customtasks.mobileactions.MobileActionsTools
 import com.google.ai.edge.gallery.customtasks.orchestrator.SkillCreatorTools
 import com.google.ai.edge.gallery.customtasks.orchestrator.WorkspaceTools
 import com.google.ai.edge.gallery.data.BuiltInTaskId
@@ -98,7 +99,17 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
             via the Multi-Agent Orchestrator screen, then output ONLY that instruction.
           • Output ONLY a brief confirmation of what was done (or the file content for reads).
 
-        BRANCH D — EXECUTE A SKILL
+        BRANCH D — MOBILE / DEVICE ACTIONS
+        Trigger: the user asks to control the device or perform a phone action — e.g. turn the
+        flashlight on/off, create a contact, send an email, show a place on the map, open WiFi
+        settings, or create a calendar event.
+          • Call EXACTLY ONE of the mobile-action tools that matches the request:
+            `turnOnFlashlight`, `turnOffFlashlight`, `createContact`, `sendEmail`,
+            `showLocationOnMap`, `openWifiSettings`, `createCalendarEvent`.
+          • Pass the parameters extracted from the user message verbatim (no skill lookup first).
+          • After the tool returns, output ONLY a one-sentence confirmation of the action taken.
+
+        BRANCH E — EXECUTE A SKILL
         Trigger: anything else (a task, question, or action the user wants performed).
         Steps (execute in order, silently):
           1. Find the most relevant skill from the list below:
@@ -168,6 +179,16 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           },
         )
 
+      // MobileActionsTools lets the model trigger device-side intents (flashlight, contacts,
+      // email, map, WiFi settings, calendar). The actual Android intent is dispatched on the UI
+      // thread by AgentChatScreen when it observes the resulting MobileActionAgentAction.
+      val mobileActionsTools =
+        MobileActionsTools(
+          onFunctionCalled = { mobileAction ->
+            agentTools.sendAction(MobileActionAgentAction(mobileAction))
+          }
+        )
+
       LlmChatModelHelper.initialize(
         context = context,
         model = model,
@@ -180,7 +201,13 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           } else {
             agentTools.skillManagerViewModel.getSystemPrompt(task.defaultSystemPrompt)
           },
-        tools = listOf(tool(agentTools), tool(skillCreatorTools), tool(workspaceTools)),
+        tools =
+          listOf(
+            tool(agentTools),
+            tool(skillCreatorTools),
+            tool(workspaceTools),
+            tool(mobileActionsTools),
+          ),
         enableConversationConstrainedDecoding = true,
       )
     }
