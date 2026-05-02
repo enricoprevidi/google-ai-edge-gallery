@@ -32,17 +32,23 @@ private const val TAG = "AGWorkspaceTools"
  * construction time. If [workspaceUri] is null, all operations return an error instructing the user
  * to set the workspace via the UI.
  *
+ * [onFileRead] / [onFileWritten] are invoked with the relative path on success so hosts can wire
+ * progress events to whatever sink they use (orchestrator action stream, AgentTools channel, etc.).
+ *
  * Security: All relative paths are validated to prevent directory traversal attacks.
  */
 class WorkspaceTools(
   private val context: Context,
-  private val workspaceUri: String?,
-  private val onActionTaken: (OrchestratorAction) -> Unit,
+  private val workspaceUriProvider: () -> String?,
+  private val onFileRead: (relativePath: String) -> Unit = {},
+  private val onFileWritten: (relativePath: String) -> Unit = {},
 ) : ToolSet {
 
   /** Returns a user-visible representation of the workspace root (for system prompt injection). */
-  fun getWorkspacePath(): String =
-    if (workspaceUri.isNullOrEmpty()) "(not set)" else workspaceUri
+  fun getWorkspacePath(): String {
+    val uri = workspaceUriProvider()
+    return if (uri.isNullOrEmpty()) "(not set)" else uri
+  }
 
   @Tool(description = "Lists files and directories in the workspace at the given relative path.")
   fun listFiles(
@@ -76,7 +82,7 @@ class WorkspaceTools(
       val content =
         context.contentResolver.openInputStream(file.uri)?.bufferedReader()?.use { it.readText() }
           ?: return mapOf("error" to "Could not open file")
-      onActionTaken(WorkspaceReadAction(relativePath))
+      onFileRead(relativePath)
       mapOf("result" to "success", "path" to relativePath, "content" to content)
     } catch (e: Exception) {
       mapOf("error" to (e.message ?: "Failed to read file"))
@@ -123,7 +129,7 @@ class WorkspaceTools(
         it.write(content)
       }
         ?: return mapOf("error" to "Could not open output stream for $relativePath")
-      onActionTaken(WorkspaceWriteAction(relativePath))
+      onFileWritten(relativePath)
       mapOf("result" to "success", "path" to relativePath)
     } catch (e: Exception) {
       mapOf("error" to (e.message ?: "Failed to write file"))
@@ -167,6 +173,7 @@ class WorkspaceTools(
   // ── helpers ──────────────────────────────────────────────────────────────
 
   private fun resolveRoot(): DocumentFile? {
+    val workspaceUri = workspaceUriProvider()
     if (workspaceUri.isNullOrEmpty()) return null
     return try {
       DocumentFile.fromTreeUri(context, Uri.parse(workspaceUri))

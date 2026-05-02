@@ -146,8 +146,9 @@ class PlannerTools(
       AgentType.WORKSPACE_AGENT -> {
         val ws = WorkspaceTools(
           context = context,
-          workspaceUri = workspaceUri(),
-          onActionTaken = onActionTaken,
+          workspaceUriProvider = workspaceUri,
+          onFileRead = { path -> onActionTaken(WorkspaceReadAction(path)) },
+          onFileWritten = { path -> onActionTaken(WorkspaceWriteAction(path)) },
         )
         val prompt =
           Contents.of(

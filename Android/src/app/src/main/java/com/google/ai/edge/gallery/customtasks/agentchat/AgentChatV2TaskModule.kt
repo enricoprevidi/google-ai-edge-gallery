@@ -23,6 +23,7 @@ import com.google.ai.edge.gallery.common.SkillProgressAgentAction
 import com.google.ai.edge.gallery.customtasks.common.CustomTask
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
 import com.google.ai.edge.gallery.customtasks.orchestrator.SkillCreatorTools
+import com.google.ai.edge.gallery.customtasks.orchestrator.WorkspaceTools
 import com.google.ai.edge.gallery.data.BuiltInTaskId
 import com.google.ai.edge.gallery.data.Category
 import com.google.ai.edge.gallery.data.Model
@@ -84,7 +85,20 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           • To list skills: call `listAvailableSkills` and output the result as a plain list.
           • To delete a skill: call `deleteCreatedSkill` with the exact skill name and confirm.
 
-        BRANCH C — EXECUTE A SKILL
+        BRANCH C — WORKSPACE FILE OPERATIONS
+        Trigger: the user asks to read, write, list, create, or delete files in their workspace,
+        or otherwise references the workspace folder.
+          • Use `listFiles(relativePath)` to see directory contents (use "" for the root).
+          • Use `readFile(relativePath)` to read text content.
+          • Use `writeFile(relativePath, content)` to create or overwrite a text file.
+          • Use `createDirectory(relativePath)` for new folders.
+          • Use `deleteFile(relativePath)` to remove a file or empty directory.
+          • All paths are relative to the workspace root. Never use absolute paths or `..`.
+          • If a tool returns "Workspace not set", instruct the user to choose a workspace folder
+            via the Multi-Agent Orchestrator screen, then output ONLY that instruction.
+          • Output ONLY a brief confirmation of what was done (or the file content for reads).
+
+        BRANCH D — EXECUTE A SKILL
         Trigger: anything else (a task, question, or action the user wants performed).
         Steps (execute in order, silently):
           1. Find the most relevant skill from the list below:
@@ -122,6 +136,38 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           },
         )
 
+      // WorkspaceTools reads the SAF folder URI persisted by OrchestratorViewModel so the user
+      // only has to grant access once (via the Multi-Agent Orchestrator screen or the workspace
+      // selector inside this screen). The lambda is called on every tool invocation, so changing
+      // the workspace from the UI takes effect immediately without resetting the session.
+      val workspacePrefs =
+        context.getSharedPreferences("orchestrator_prefs", Context.MODE_PRIVATE)
+      val workspaceTools =
+        WorkspaceTools(
+          context = context,
+          workspaceUriProvider = {
+            workspacePrefs.getString("workspace_uri", null)?.takeIf { it.isNotEmpty() }
+          },
+          onFileRead = { path ->
+            agentTools.sendAction(
+              SkillProgressAgentAction(
+                label = "Read file \"$path\"",
+                inProgress = false,
+              )
+            )
+          },
+          onFileWritten = { path ->
+            agentTools.sendAction(
+              SkillProgressAgentAction(
+                label = "Wrote file \"$path\"",
+                inProgress = false,
+                addItemTitle = "Wrote file \"$path\"",
+                addItemDescription = "Saved to the workspace folder.",
+              )
+            )
+          },
+        )
+
       LlmChatModelHelper.initialize(
         context = context,
         model = model,
@@ -134,7 +180,7 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           } else {
             agentTools.skillManagerViewModel.getSystemPrompt(task.defaultSystemPrompt)
           },
-        tools = listOf(tool(agentTools), tool(skillCreatorTools)),
+        tools = listOf(tool(agentTools), tool(skillCreatorTools), tool(workspaceTools)),
         enableConversationConstrainedDecoding = true,
       )
     }

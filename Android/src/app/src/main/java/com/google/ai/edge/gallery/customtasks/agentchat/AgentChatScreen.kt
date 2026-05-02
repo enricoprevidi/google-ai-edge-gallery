@@ -22,6 +22,8 @@ import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -42,6 +44,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -138,6 +142,27 @@ fun AgentChatScreen(
   var showAlertForDisabledSkill by remember { mutableStateOf(false) }
   var disabledSkillName by remember { mutableStateOf("") }
 
+  // Workspace selector state — only meaningful for the V2 (Multi-Agent Skills) task. The URI is
+  // shared with the Multi-Agent Orchestrator via the same SharedPreferences key.
+  val workspacePrefs = remember(context) {
+    context.getSharedPreferences("orchestrator_prefs", Context.MODE_PRIVATE)
+  }
+  var workspaceUri by remember {
+    mutableStateOf(workspacePrefs.getString("workspace_uri", "") ?: "")
+  }
+  val workspacePicker =
+    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+      if (uri != null) {
+        context.contentResolver.takePersistableUriPermission(
+          uri,
+          android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+        )
+        workspacePrefs.edit().putString("workspace_uri", uri.toString()).apply()
+        workspaceUri = uri.toString()
+      }
+    }
+
   LlmChatScreen(
     modelManagerViewModel = modelManagerViewModel,
     taskId = taskId,
@@ -208,6 +233,37 @@ fun AgentChatScreen(
       }
     },
     composableBelowMessageList = { model ->
+      // Workspace selector pill (V2 only).
+      if (taskId == BuiltInTaskId.LLM_AGENT_CHAT_V2) {
+        val workspaceLabel =
+          if (workspaceUri.isEmpty()) "Workspace: not set"
+          else "Workspace: " + workspaceUri.substringAfterLast('/').substringAfterLast("%2F")
+        Row(
+          modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          AssistChip(
+            onClick = { workspacePicker.launch(null) },
+            label = { Text(workspaceLabel, maxLines = 1) },
+            leadingIcon = {
+              Icon(
+                imageVector = ImageVector.vectorResource(R.drawable.skill),
+                contentDescription = null,
+                modifier = Modifier.size(AssistChipDefaults.IconSize),
+              )
+            },
+          )
+          if (workspaceUri.isNotEmpty()) {
+            Text(
+              "Tap to change",
+              style = MaterialTheme.typography.labelSmall,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+          }
+        }
+      }
+
       val actionChannel = agentTools.actionChannel
       val doneIcon = ImageVector.vectorResource(R.drawable.skill)
       // Use rememberUpdatedState to ensure that LaunchedEffect captures the
