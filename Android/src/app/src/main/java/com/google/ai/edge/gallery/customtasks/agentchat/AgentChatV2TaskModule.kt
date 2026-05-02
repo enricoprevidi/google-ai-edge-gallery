@@ -23,6 +23,7 @@ import com.google.ai.edge.gallery.common.SkillProgressAgentAction
 import com.google.ai.edge.gallery.customtasks.common.CustomTask
 import com.google.ai.edge.gallery.customtasks.common.CustomTaskDataForBuiltinTask
 import com.google.ai.edge.gallery.customtasks.mobileactions.MobileActionsTools
+import com.google.ai.edge.gallery.customtasks.mobileactions.getSystemPrompt as getMobileActionsSystemPrompt
 import com.google.ai.edge.gallery.customtasks.orchestrator.SkillCreatorTools
 import com.google.ai.edge.gallery.customtasks.orchestrator.WorkspaceTools
 import com.google.ai.edge.gallery.data.BuiltInTaskId
@@ -189,25 +190,38 @@ class AgentChatV2Task @Inject constructor() : CustomTask {
           }
         )
 
+      // The MobileActions-270M Function Gemma model is fine-tuned ONLY on the lightweight
+      // date/time system prompt + the mobile-action tool definitions. Feeding it the long
+      // multi-branch skill prompt makes it loop and never produce a function call. Detect that
+      // model by name and swap in the MobileActions system prompt.
+      val isMobileActionsModel = model.name.contains("MobileActions", ignoreCase = true)
+      val systemInstruction =
+        when {
+          isMobileActionsModel -> getMobileActionsSystemPrompt()
+          agentTools.skillManagerViewModel.getSelectedSkills().isEmpty() -> null
+          else -> agentTools.skillManagerViewModel.getSystemPrompt(task.defaultSystemPrompt)
+        }
+
       LlmChatModelHelper.initialize(
         context = context,
         model = model,
-        supportImage = true,
-        supportAudio = true,
+        supportImage = model.llmSupportImage,
+        supportAudio = model.llmSupportAudio,
         onDone = onDone,
-        systemInstruction =
-          if (agentTools.skillManagerViewModel.getSelectedSkills().isEmpty()) {
-            null
-          } else {
-            agentTools.skillManagerViewModel.getSystemPrompt(task.defaultSystemPrompt)
-          },
+        systemInstruction = systemInstruction,
         tools =
-          listOf(
-            tool(agentTools),
-            tool(skillCreatorTools),
-            tool(workspaceTools),
-            tool(mobileActionsTools),
-          ),
+          if (isMobileActionsModel) {
+            // 270M Function Gemma only knows the mobile-action tools. Adding skill/workspace
+            // tools would exceed its training distribution and produce no calls.
+            listOf(tool(mobileActionsTools))
+          } else {
+            listOf(
+              tool(agentTools),
+              tool(skillCreatorTools),
+              tool(workspaceTools),
+              tool(mobileActionsTools),
+            )
+          },
         enableConversationConstrainedDecoding = true,
       )
     }

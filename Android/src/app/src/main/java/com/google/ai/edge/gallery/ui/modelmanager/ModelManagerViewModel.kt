@@ -1035,6 +1035,15 @@ constructor(
               agentChatV2Task.models.add(model)
             }
           }
+          // Also mirror Mobile Actions models so the V2 task can drive device intents
+          // (flashlight, contacts, email, map, WiFi, calendar) via MobileActionsTools.
+          val mobileActionsModels =
+            curTasks.find { it.id == BuiltInTaskId.LLM_MOBILE_ACTIONS }?.models ?: mutableListOf()
+          for (model in mobileActionsModels) {
+            if (agentChatV2Task.models.none { it.name == model.name }) {
+              agentChatV2Task.models.add(model)
+            }
+          }
           Log.d(TAG, "Mirrored ${agentChatV2Task.models.size} models to Multi-Agent Skills task.")
         }
 
