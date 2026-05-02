@@ -963,8 +963,11 @@ private fun OrchestratorStatusPanel() {
         Column(
           modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
         ) {
+          val sizeMb = if (m.sizeBytes > 0) " · ~${m.sizeBytes / (1024L * 1024L)} MB" else ""
           Text(
-            "${m.name}  [${m.role}]" + if (m.sharedWithPlanner) "  · shared engine" else "",
+            "${m.name}  [${m.role}]" +
+              (if (m.sharedWithPlanner) "  · shared engine" else "") +
+              sizeMb,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
           )

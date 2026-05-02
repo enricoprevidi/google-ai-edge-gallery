@@ -147,6 +147,7 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
           context = context,
           skillManagerViewModel = agentTools.skillManagerViewModel,
           onSkillCreated = { skillName ->
+            OrchestratorStatus.addLog("skill_creator", "created skill: $skillName")
             agentTools.sendAction(
               SkillProgressAgentAction(
                 label = "Created skill \"$skillName\"",
@@ -164,11 +165,13 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
           context = context,
           workspaceUriProvider = workspaceUriProvider,
           onFileRead = { path ->
+            OrchestratorStatus.addLog("workspace", "readFile: $path")
             agentTools.sendAction(
               SkillProgressAgentAction(label = "Read file \"$path\"", inProgress = false)
             )
           },
           onFileWritten = { path ->
+            OrchestratorStatus.addLog("workspace", "writeFile: $path")
             agentTools.sendAction(
               SkillProgressAgentAction(
                 label = "Wrote file \"$path\"",
@@ -183,6 +186,7 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
       val mobileActionsTools =
         MobileActionsTools(
           onFunctionCalled = { mobileAction ->
+            OrchestratorStatus.addLog("mobile_actions", mobileAction.toString().take(120))
             agentTools.sendAction(MobileActionAgentAction(mobileAction))
           }
         )
@@ -324,6 +328,7 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
           role = "planner",
           sharedWithPlanner = false,
           tools = plannerToolNames,
+          sizeBytes = model.totalBytes,
         )
       )
       for (entry in specialistEntries.values) {
@@ -333,6 +338,7 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
             role = "specialist",
             sharedWithPlanner = false,
             tools = specialistToolNames,
+            sizeBytes = entry.model.totalBytes,
           )
         )
       }

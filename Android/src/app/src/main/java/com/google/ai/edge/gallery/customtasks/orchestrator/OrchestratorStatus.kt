@@ -21,6 +21,8 @@ object OrchestratorStatus {
     val role: String, // "planner" | "specialist" | "planner+specialist"
     val sharedWithPlanner: Boolean,
     val tools: List<String>,
+    /** Approximate weights size on disk in bytes (≈ RAM footprint when loaded). 0 = unknown. */
+    val sizeBytes: Long = 0L,
   )
 
   /** A single entry in the orchestration log. */
@@ -85,7 +87,8 @@ object OrchestratorStatus {
     addLog("system", "Models in RAM: $summary")
   }
 
-  /** Adds a free-form log entry. */
+  /** Adds a free-form log entry. Also updates [lastActivity] for non-system entries so the
+   *  in-chat loading bubble can surface the current action. */
   fun addLog(source: String, message: String) {
     val entry = LogEntry(System.currentTimeMillis(), source, message)
     val cur = _log.value
@@ -93,6 +96,9 @@ object OrchestratorStatus {
       if (cur.size >= MAX_LOG_ENTRIES) cur.drop(cur.size - MAX_LOG_ENTRIES + 1) + entry
       else cur + entry
     _log.value = next
+    if (source != "system") {
+      _lastActivity.value = "$source: ${message.take(80)}"
+    }
   }
 
   fun reset() {

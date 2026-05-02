@@ -43,7 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus
 import com.google.ai.edge.gallery.ui.common.RotationalLoader
+import androidx.compose.runtime.collectAsState
 
 /** Composable function to display a loading indicator. */
 @Composable
@@ -63,6 +65,19 @@ fun MessageBodyLoading(message: ChatMessageLoading? = null) {
       label = "icon-alpha",
     )
 
+  // While the V2 Orchestrator is active, surface its current activity (e.g. dispatch target,
+  // "→ workspace_agent: list files", "✓ mobile_agent: …") instead of leaving the loader bare.
+  // Falls back to whatever the chat layer set on `extraProgressLabel`.
+  val orchestratorPlanner by OrchestratorStatus.plannerName.collectAsState()
+  val orchestratorActivity by OrchestratorStatus.lastActivity.collectAsState()
+  val explicitLabel = message?.extraProgressLabel ?: ""
+  val displayLabel = when {
+    explicitLabel.isNotEmpty() -> explicitLabel
+    orchestratorPlanner.isNotEmpty() && orchestratorActivity.isNotEmpty() &&
+      orchestratorActivity != "idle" && orchestratorActivity != "ready" -> orchestratorActivity
+    else -> ""
+  }
+
   Row(
     horizontalArrangement = Arrangement.SpaceBetween,
     verticalAlignment = Alignment.CenterVertically,
@@ -70,9 +85,9 @@ fun MessageBodyLoading(message: ChatMessageLoading? = null) {
   ) {
     RotationalLoader(size = 32.dp)
 
-    if (message?.extraProgressLabel?.isNotEmpty() == true) {
+    if (displayLabel.isNotEmpty()) {
       AnimatedContent(
-        message.extraProgressLabel,
+        displayLabel,
         transitionSpec = { fadeIn() togetherWith fadeOut() },
       ) { label ->
         Row(
