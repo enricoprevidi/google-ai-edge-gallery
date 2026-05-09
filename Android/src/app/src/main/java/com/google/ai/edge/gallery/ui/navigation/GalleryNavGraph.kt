@@ -96,6 +96,7 @@ private const val ROUTE_MODEL_LIST = "model_list"
 private const val ROUTE_MODEL = "route_model"
 private const val ROUTE_BENCHMARK = "benchmark"
 private const val ROUTE_MODEL_MANAGER = "model_manager"
+private const val ROUTE_REMOTE_API = "remote_api"
 private const val ENTER_ANIMATION_DURATION_MS = 500
 private val ENTER_ANIMATION_EASING = EaseOutExpo
 private const val ENTER_ANIMATION_DELAY_MS = 100
@@ -208,6 +209,7 @@ fun GalleryNavHost(
               )
             },
             onModelsClicked = { navController.navigate(ROUTE_MODEL_MANAGER) },
+            onRemoteApiClicked = { navController.navigate(ROUTE_REMOTE_API) },
             gm4 = true,
           )
         }
@@ -436,6 +438,18 @@ fun GalleryNavHost(
           },
         )
       }
+    }
+
+    // Remote API server page.
+    composable(
+      route = ROUTE_REMOTE_API,
+      enterTransition = { slideUpEnter() },
+      exitTransition = { slideDownExit() },
+    ) {
+      com.google.ai.edge.gallery.ui.remoteapi.RemoteApiServerScreen(
+        modelManagerViewModel = modelManagerViewModel,
+        onBackClicked = { navController.navigateUp() },
+      )
     }
   }
 

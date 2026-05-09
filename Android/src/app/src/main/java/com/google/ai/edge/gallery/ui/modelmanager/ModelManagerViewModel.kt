@@ -234,6 +234,10 @@ constructor(
   val authService = AuthorizationService(context)
   var curAccessToken: String = ""
 
+  init {
+    com.google.ai.edge.gallery.service.RemoteApiServerHolder.registerViewModel(this)
+  }
+
   override fun onCleared() {
     authService.dispose()
   }
