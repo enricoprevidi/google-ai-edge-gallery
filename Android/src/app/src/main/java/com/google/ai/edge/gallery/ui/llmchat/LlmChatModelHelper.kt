@@ -107,47 +107,65 @@ object LlmChatModelHelper : LlmModelHelper {
     Log.d(TAG, "Preferred backend: $preferredBackend")
 
     val modelPath = model.getPath(context = context)
-    val engineConfig =
-      EngineConfig(
-        modelPath = modelPath,
-        backend = preferredBackend,
-        visionBackend = if (shouldEnableImage) visionBackend else null, // must be GPU for Gemma 3n
-        audioBackend = if (shouldEnableAudio) Backend.CPU() else null, // must be CPU for Gemma 3n
-        maxNumTokens = maxTokens,
-        cacheDir =
-          if (modelPath.startsWith("/data/local/tmp"))
-            context.getExternalFilesDir(null)?.absolutePath
-          else null,
-      )
 
     // Create an instance of LiteRT LM engine and conversation.
-    try {
-      val engine = Engine(engineConfig)
-      engine.initialize()
-
-      ExperimentalFlags.enableConversationConstrainedDecoding =
-        enableConversationConstrainedDecoding
-      val conversation =
-        engine.createConversation(
-          ConversationConfig(
-            samplerConfig =
-              if (preferredBackend is Backend.NPU) {
-                null
-              } else {
-                SamplerConfig(
-                  topK = topK,
-                  topP = topP.toDouble(),
-                  temperature = temperature.toDouble(),
-                )
-              },
-            systemInstruction = systemInstruction,
-            tools = tools,
-          )
+    fun tryInit(backend: Backend): Boolean {
+      val config =
+        EngineConfig(
+          modelPath = modelPath,
+          backend = backend,
+          visionBackend = if (shouldEnableImage) visionBackend else null,
+          audioBackend = if (shouldEnableAudio) Backend.CPU() else null,
+          maxNumTokens = maxTokens,
+          cacheDir =
+            if (modelPath.startsWith("/data/local/tmp"))
+              context.getExternalFilesDir(null)?.absolutePath
+            else null,
         )
-      ExperimentalFlags.enableConversationConstrainedDecoding = false
-      model.instance = LlmModelInstance(engine = engine, conversation = conversation)
-    } catch (e: Exception) {
-      onDone(cleanUpMediapipeTaskErrorMessage(e.message ?: "Unknown error"))
+      return try {
+        val engine = Engine(config)
+        engine.initialize()
+        ExperimentalFlags.enableConversationConstrainedDecoding =
+          enableConversationConstrainedDecoding
+        val conversation =
+          engine.createConversation(
+            ConversationConfig(
+              samplerConfig =
+                if (backend is Backend.NPU) {
+                  null
+                } else {
+                  SamplerConfig(
+                    topK = topK,
+                    topP = topP.toDouble(),
+                    temperature = temperature.toDouble(),
+                  )
+                },
+              systemInstruction = systemInstruction,
+              tools = tools,
+            )
+          )
+        ExperimentalFlags.enableConversationConstrainedDecoding = false
+        model.instance = LlmModelInstance(engine = engine, conversation = conversation)
+        true
+      } catch (e: Exception) {
+        Log.w(TAG, "Failed to initialize with backend $backend: ${e.message}")
+        false
+      }
+    }
+
+    // Try preferred backend first; if it's NPU/TPU and fails, fall back to GPU then CPU.
+    val succeeded = tryInit(preferredBackend) ||
+      (preferredBackend is Backend.NPU && run {
+        Log.w(TAG, "NPU/TPU backend unavailable, retrying with GPU.")
+        tryInit(Backend.GPU())
+      }) ||
+      (preferredBackend is Backend.NPU && run {
+        Log.w(TAG, "GPU backend also failed, retrying with CPU.")
+        tryInit(Backend.CPU())
+      })
+
+    if (!succeeded) {
+      onDone("Failed to initialize model '${model.name}'. The device may not support the required hardware backend.")
       return
     }
     onDone("")

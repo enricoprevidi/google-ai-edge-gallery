@@ -69,6 +69,29 @@
         "accelerators": "cpu"
       },
       "taskTypes": ["llm_chat", "llm_prompt_lab"]
+    },
+    {
+      "name": "Qwen3-0.6B",
+      "modelId": "litert-community/Qwen3-0.6B",
+      "modelFile": "Qwen3-0.6B.litertlm",
+      "commitHash": "4c0f158768e8ed6b3cebc54e617732e9b1d819ae",
+      "description": "A variant of [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) ready for deployment on Android using [LiteRT-LM](https://github.com/google-ai-edge/LiteRT-LM/blob/main/kotlin/README.md). Supports CPU and GPU acceleration.",
+      "sizeInBytes": 614891520,
+      "estimatedPeakMemoryInBytes": 1610612736,
+      "defaultConfig": {
+        "topK": 40,
+        "topP": 0.95,
+        "temperature": 0.6,
+        "maxTokens": 2048,
+        "accelerators": "gpu,cpu"
+      },
+      "taskTypes": [
+        "llm_chat",
+        "llm_prompt_lab",
+        "llm_agent_chat",
+        "llm_agent_chat_v2",
+        "llm_orchestrator_v2"
+      ]
     }
   ]
 }

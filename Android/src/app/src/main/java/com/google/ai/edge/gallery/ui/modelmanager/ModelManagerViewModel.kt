@@ -79,8 +79,34 @@ private const val TAG = "AGModelManagerViewModel"
 private const val TEXT_INPUT_HISTORY_MAX_SIZE = 50
 private const val MODEL_ALLOWLIST_FILENAME = "model_allowlist.json"
 private const val MODEL_ALLOWLIST_TEST_FILENAME = "model_allowlist_test.json"
+private const val USER_HF_MODELS_FILENAME = "user_hf_models.json"
+private const val HF_SEARCH_PREFS_FILENAME = "hf_search_prefs.json"
+private val DEFAULT_HF_SEARCH_AUTHORS = listOf("litert-community", "google")
 private const val ALLOWLIST_BASE_URL =
   "https://raw.githubusercontent.com/google-ai-edge/gallery/refs/heads/main/model_allowlists"
+
+/** A model added by the user via the HuggingFace model picker. Persisted to disk as JSON. */
+data class UserHFModel(
+  val name: String,
+  val modelId: String,
+  val modelFile: String,
+  val commitHash: String,
+  val sizeInBytes: Long,
+  /**
+   * Accelerator labels (e.g. "CPU", "GPU", "NPU") allowed at runtime. The first entry becomes
+   * the default accelerator. Default preserves legacy behavior for entries written before this
+   * field existed.
+   */
+  val accelerators: List<String>? = listOf("GPU", "CPU"),
+)
+
+data class UserHFModelList(val models: List<UserHFModel> = emptyList())
+
+/** Persisted preferences for the HuggingFace model search dialog. */
+data class HFSearchPreferences(
+  val authors: List<String> = DEFAULT_HF_SEARCH_AUTHORS,
+  val searchAll: Boolean = false,
+)
 
 private const val TEST_MODEL_ALLOW_LIST = ""
 
@@ -395,6 +421,7 @@ constructor(
       }
       dataStoreRepository.saveImportedModels(importedModels = importedModels)
     }
+
     val newUiState =
       uiState.value.copy(
         modelDownloadStatus = curModelDownloadStatus,
@@ -402,6 +429,30 @@ constructor(
         modelImportingUpdateTrigger = System.currentTimeMillis(),
       )
     _uiState.update { newUiState }
+  }
+
+  /**
+   * Removes a user-added HF model from the persisted JSON file and from all live task lists.
+   * Only call this when the user explicitly deletes the model; NOT during download cleanup.
+   */
+  fun removeUserHFModelEntry(model: Model) {
+    if (!model.isUserHFModel) return
+    val updated = readUserHFModels().toMutableList()
+    updated.removeAll { it.name == model.name }
+    saveUserHFModels(updated)
+    val curModelDownloadStatus = uiState.value.modelDownloadStatus.toMutableMap()
+    curModelDownloadStatus.remove(model.name)
+    for (curTask in uiState.value.tasks) {
+      curTask.models.removeIf { it.name == model.name }
+      curTask.updateTrigger.value = System.currentTimeMillis()
+    }
+    _uiState.update {
+      it.copy(
+        modelDownloadStatus = curModelDownloadStatus,
+        tasks = uiState.value.tasks.toList(),
+        modelImportingUpdateTrigger = System.currentTimeMillis(),
+      )
+    }
   }
 
   fun initializeModel(
@@ -609,6 +660,9 @@ constructor(
     try {
       val url = URL(model.url)
       val connection = url.openConnection() as HttpURLConnection
+      connection.connectTimeout = 10_000
+      connection.readTimeout = 10_000
+      connection.instanceFollowRedirects = true
       if (accessToken != null) {
         connection.setRequestProperty("Authorization", "Bearer $accessToken")
       }
@@ -1028,6 +1082,9 @@ constructor(
           )
         }
 
+        // Load user-added HuggingFace models from disk.
+        loadUserHFModelsIntoTasks(curTasks = curTasks)
+
         // Mirror Agent Skills models into Multi-Agent Skills (same allowlist, different task).
         val agentChatModels = curTasks.find { it.id == BuiltInTaskId.LLM_AGENT_CHAT }?.models ?: mutableListOf()
         val agentChatV2Task = curTasks.find { it.id == BuiltInTaskId.LLM_AGENT_CHAT_V2 }
@@ -1085,7 +1142,14 @@ constructor(
         // Wait for AICore models statuses and update download indicators
         checkAICoreModelStatuses()
       } catch (e: Exception) {
+        Log.e(TAG, "Failed to load model allowlist", e)
         e.printStackTrace()
+        _uiState.update {
+          uiState.value.copy(
+            loadingModelAllowlist = false,
+            loadingModelAllowlistError = "Failed to load model list: ${e.message}",
+          )
+        }
       }
     }
   }
@@ -1219,6 +1283,29 @@ constructor(
           receivedBytes = importedModel.fileSize,
           totalBytes = importedModel.fileSize,
         )
+    }
+
+    // Load user-added HuggingFace models.
+    for (userModel in readUserHFModels()) {
+      val model = createModelFromUserHFModel(userModel)
+      val agentTaskIds = setOf(
+        BuiltInTaskId.LLM_CHAT,
+        BuiltInTaskId.LLM_PROMPT_LAB,
+        BuiltInTaskId.LLM_AGENT_CHAT,
+        BuiltInTaskId.LLM_AGENT_CHAT_V2,
+        BuiltInTaskId.LLM_ORCHESTRATOR,
+        BuiltInTaskId.LLM_ORCHESTRATOR_V2,
+      )
+      for (taskId in agentTaskIds) {
+        tasks[taskId]?.let { task ->
+          if (task.models.none { it.name == model.name }) {
+            task.models.add(model)
+          }
+        }
+      }
+      modelDownloadStatus[model.name] = getModelDownloadStatus(model = model)
+      modelInstances[model.name] =
+        ModelInitializationStatus(status = ModelInitializationStatusType.NOT_INITIALIZED)
     }
 
     val textInputHistory = dataStoreRepository.readTextInputHistory()
@@ -1524,6 +1611,156 @@ constructor(
         )
 
     return downloadedFileExists || unzippedDirectoryExists
+  }
+
+  // ─── User HuggingFace model persistence ────────────────────────────────────
+
+  private fun readUserHFModels(): List<UserHFModel> {
+    return try {
+      val file = File(externalFilesDir, USER_HF_MODELS_FILENAME)
+      if (!file.exists()) return emptyList()
+      val json = file.readText()
+      Gson().fromJson(json, UserHFModelList::class.java)?.models ?: emptyList()
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to read user HF models", e)
+      emptyList()
+    }
+  }
+
+  private fun saveUserHFModels(models: List<UserHFModel>) {
+    try {
+      val file = File(externalFilesDir, USER_HF_MODELS_FILENAME)
+      file.writeText(Gson().toJson(UserHFModelList(models)))
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to save user HF models", e)
+    }
+  }
+
+  /** Returns the persisted HF search preferences, or the defaults if none exist. */
+  fun readHFSearchPreferences(): HFSearchPreferences {
+    return try {
+      val file = File(externalFilesDir, HF_SEARCH_PREFS_FILENAME)
+      if (!file.exists()) return HFSearchPreferences()
+      Gson().fromJson(file.readText(), HFSearchPreferences::class.java) ?: HFSearchPreferences()
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to read HF search prefs", e)
+      HFSearchPreferences()
+    }
+  }
+
+  /** Persists the HF search preferences to disk. */
+  fun saveHFSearchPreferences(prefs: HFSearchPreferences) {
+    try {
+      val file = File(externalFilesDir, HF_SEARCH_PREFS_FILENAME)
+      file.writeText(Gson().toJson(prefs))
+    } catch (e: Exception) {
+      Log.e(TAG, "Failed to save HF search prefs", e)
+    }
+  }
+
+  private fun createModelFromUserHFModel(userModel: UserHFModel): Model {
+    val downloadUrl =
+      "https://huggingface.co/${userModel.modelId}/resolve/${userModel.commitHash}/${userModel.modelFile}?download=true"
+    // `accelerators` may be null when reading legacy JSON entries (Gson uses Unsafe and skips
+    // Kotlin default initializers), so coerce to an empty list before parsing.
+    val accelerators = (userModel.accelerators ?: emptyList())
+      .mapNotNull { label -> Accelerator.entries.find { it.label == label } }
+      .ifEmpty { listOf(Accelerator.GPU, Accelerator.CPU) }
+    val configs = createLlmChatConfigs(
+      defaultMaxToken = 2048,
+      defaultTopK = 40,
+      defaultTopP = 0.95f,
+      defaultTemperature = 0.7f,
+      accelerators = accelerators,
+    ).toMutableList()
+    val model = Model(
+      name = userModel.name,
+      version = userModel.commitHash.ifBlank { "_" },
+      url = downloadUrl,
+      sizeInBytes = userModel.sizeInBytes,
+      downloadFileName = userModel.modelFile,
+      configs = configs,
+      isLlm = true,
+      runtimeType = RuntimeType.LITERT_LM,
+      accelerators = accelerators,
+      llmMaxToken = 2048,
+      isUserHFModel = true,
+    )
+    model.preProcess()
+    return model
+  }
+
+  /** Loads user-added HF models from disk and inserts them into relevant tasks. */
+  private fun loadUserHFModelsIntoTasks(curTasks: List<Task>) {
+    val agentTaskIds = listOf(
+      BuiltInTaskId.LLM_CHAT,
+      BuiltInTaskId.LLM_PROMPT_LAB,
+      BuiltInTaskId.LLM_AGENT_CHAT,
+      BuiltInTaskId.LLM_AGENT_CHAT_V2,
+      BuiltInTaskId.LLM_ORCHESTRATOR,
+      BuiltInTaskId.LLM_ORCHESTRATOR_V2,
+    )
+    for (userModel in readUserHFModels()) {
+      val model = createModelFromUserHFModel(userModel)
+      for (taskId in agentTaskIds) {
+        val task = curTasks.find { it.id == taskId }
+        if (task != null && task.models.none { it.name == model.name }) {
+          task.models.add(model)
+        }
+      }
+      Log.d(TAG, "Loaded user HF model '${userModel.name}' into tasks.")
+    }
+  }
+
+  /** Called from the UI when the user confirms adding a model from HuggingFace. */
+  fun addHuggingFaceDownloadableModel(selection: com.google.ai.edge.gallery.ui.modelmanager.HuggingFaceModelSelection) {
+    val userModel = UserHFModel(
+      name = selection.displayName,
+      modelId = selection.modelId,
+      modelFile = selection.modelFile,
+      commitHash = selection.sha,
+      sizeInBytes = selection.sizeInBytes,
+      accelerators = selection.accelerators.map { it.label },
+    )
+
+    // Persist to disk.
+    val existing = readUserHFModels().toMutableList()
+    existing.removeAll { it.name == userModel.name }
+    existing.add(userModel)
+    saveUserHFModels(existing)
+
+    // Add to live task lists.
+    val model = createModelFromUserHFModel(userModel)
+    val agentTaskIds = setOf(
+      BuiltInTaskId.LLM_CHAT,
+      BuiltInTaskId.LLM_PROMPT_LAB,
+      BuiltInTaskId.LLM_AGENT_CHAT,
+      BuiltInTaskId.LLM_AGENT_CHAT_V2,
+      BuiltInTaskId.LLM_ORCHESTRATOR,
+      BuiltInTaskId.LLM_ORCHESTRATOR_V2,
+    )
+    for (task in getTasksByIds(ids = agentTaskIds)) {
+      if (task.models.none { it.name == model.name }) {
+        task.models.add(model)
+      }
+      task.updateTrigger.value = System.currentTimeMillis()
+    }
+
+    // Update UI state with download status.
+    val curModelDownloadStatus = uiState.value.modelDownloadStatus.toMutableMap()
+    val curModelInstances = uiState.value.modelInitializationStatus.toMutableMap()
+    curModelDownloadStatus[model.name] = getModelDownloadStatus(model = model)
+    curModelInstances[model.name] =
+      ModelInitializationStatus(status = ModelInitializationStatusType.NOT_INITIALIZED)
+
+    _uiState.update {
+      uiState.value.copy(
+        tasks = uiState.value.tasks.toList(),
+        modelDownloadStatus = curModelDownloadStatus,
+        modelInitializationStatus = curModelInstances,
+        modelImportingUpdateTrigger = System.currentTimeMillis(),
+      )
+    }
   }
 }
 

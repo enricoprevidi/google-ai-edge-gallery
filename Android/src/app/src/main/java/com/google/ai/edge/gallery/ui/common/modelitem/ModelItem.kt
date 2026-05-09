@@ -387,11 +387,11 @@ fun ModelVariantHeader(
       )
     }
     // Model action menu (benchmark, delete)
-    if (downloadStatus?.status == ModelDownloadStatusType.SUCCEEDED) {
+    if (downloadStatus?.status == ModelDownloadStatusType.SUCCEEDED || variantModel.isUserHFModel) {
       ModelItemActionMenu(
         model = variantModel,
         modelManagerViewModel = modelManagerViewModel,
-        showBenchmarkButton = showBenchmarkButton,
+        showBenchmarkButton = showBenchmarkButton && downloadStatus?.status == ModelDownloadStatusType.SUCCEEDED,
         showDeleteButton =
           showDeleteButton &&
             variantModel.localFileRelativeDirPathOverride.isEmpty() &&
@@ -465,6 +465,7 @@ fun ModelItemActionMenu(
         model = model,
         onConfirm = {
           modelManagerViewModel.deleteModel(model = model)
+          modelManagerViewModel.removeUserHFModelEntry(model = model)
           showConfirmDeleteDialog = false
         },
         onDismiss = { showConfirmDeleteDialog = false },

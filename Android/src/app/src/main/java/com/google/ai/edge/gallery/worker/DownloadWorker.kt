@@ -131,6 +131,9 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
             val url = URL(file.url)
 
             val connection = url.openConnection() as HttpURLConnection
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 60_000
+            connection.instanceFollowRedirects = true
             if (accessToken != null) {
               Log.d(TAG, "Using access token: ${accessToken.subSequence(0, 10)}...")
               connection.setRequestProperty("Authorization", "Bearer $accessToken")
@@ -165,6 +168,13 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
             }
             connection.connect()
             Log.d(TAG, "response code: ${connection.responseCode}")
+
+            // Use Content-Length from the server if totalBytes was not provided (e.g. HF API
+            // didn't include file size). This enables accurate progress reporting.
+            val effectiveTotalBytes = if (totalBytes > 0L) totalBytes else {
+              val contentLength = connection.contentLengthLong
+              if (contentLength > 0L) contentLength else 0L
+            }
 
             if (
               connection.responseCode == HttpURLConnection.HTTP_OK ||
@@ -224,8 +234,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
 
                 // Calculate remaining seconds
                 var remainingMs = 0f
-                if (bytesPerMs > 0f && totalBytes > 0L) {
-                  remainingMs = (totalBytes - downloadedBytes) / bytesPerMs
+                if (bytesPerMs > 0f && effectiveTotalBytes > 0L) {
+                  remainingMs = (effectiveTotalBytes - downloadedBytes) / bytesPerMs
                 }
 
                 setProgress(
@@ -235,9 +245,10 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                     .putLong(KEY_MODEL_DOWNLOAD_REMAINING_MS, remainingMs.toLong())
                     .build()
                 )
+                val notifProgress = if (effectiveTotalBytes > 0L) (downloadedBytes * 100 / effectiveTotalBytes).toInt() else 0
                 setForeground(
                   createForegroundInfo(
-                    progress = (downloadedBytes * 100 / totalBytes).toInt(),
+                    progress = notifProgress,
                     modelName = modelName,
                   )
                 )

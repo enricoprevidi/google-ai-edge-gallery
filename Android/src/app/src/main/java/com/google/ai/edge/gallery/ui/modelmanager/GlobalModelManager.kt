@@ -50,6 +50,7 @@ import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -124,6 +125,7 @@ fun GlobalModelManager(
   val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
   var showImportDialog by remember { mutableStateOf(false) }
   var showImportingDialog by remember { mutableStateOf(false) }
+  var showHuggingFacePickerDialog by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val context = LocalContext.current
   val snackbarHostState = remember { SnackbarHostState() }
@@ -437,7 +439,53 @@ fun GlobalModelManager(
           Text("From local model file", modifier = Modifier.clearAndSetSemantics {})
         }
       }
+
+      // From HuggingFace option
+      Box(
+        modifier = Modifier
+          .fillMaxWidth()
+          .clickable {
+            scope.launch {
+              kotlinx.coroutines.delay(200)
+              showImportModelSheet = false
+              showHuggingFacePickerDialog = true
+            }
+          }
+          .semantics {
+            role = Role.Button
+            contentDescription = "Add from HuggingFace"
+          }
+      ) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          modifier = Modifier.fillMaxWidth().padding(16.dp),
+        ) {
+          Icon(Icons.Rounded.Hub, contentDescription = null)
+          Text("From HuggingFace", modifier = Modifier.clearAndSetSemantics {})
+        }
+      }
     }
+  }
+
+  // HuggingFace model picker dialog
+  if (showHuggingFacePickerDialog) {
+    val initialPrefs = remember { viewModel.readHFSearchPreferences() }
+    HuggingFaceModelPickerDialog(
+      onDismiss = { showHuggingFacePickerDialog = false },
+      onModelSelected = { selection ->
+        showHuggingFacePickerDialog = false
+        viewModel.addHuggingFaceDownloadableModel(selection)
+        scope.launch {
+          snackbarHostState.showSnackbar("Model '${selection.displayName}' added. Tap to download.")
+        }
+      },
+      initialAuthors = initialPrefs.authors,
+      initialSearchAll = initialPrefs.searchAll,
+      onPreferencesChanged = { authors, searchAll ->
+        viewModel.saveHFSearchPreferences(HFSearchPreferences(authors, searchAll))
+      },
+    )
   }
 
   // Import dialog

@@ -16,6 +16,8 @@
         "/^& \"\\.\\\\gradlew\\.bat\" \":app:compileDebugKotlin\" 2>&1 \\| Select-String -Pattern \"error:\\|warning:\\|BUILD\" \\| Select-Object -First 50$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "Push-Location": true,
+        "Pop-Location": true
     }
 }

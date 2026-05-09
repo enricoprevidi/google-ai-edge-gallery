@@ -73,6 +73,7 @@ fun DeleteModelButton(
       model = model,
       onConfirm = {
         modelManagerViewModel.deleteModel(model = model)
+        modelManagerViewModel.removeUserHFModelEntry(model = model)
         showConfirmDeleteDialog = false
       },
       onDismiss = { showConfirmDeleteDialog = false },

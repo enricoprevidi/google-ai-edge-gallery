@@ -296,6 +296,9 @@ data class Model(
   /** Whether the model is imported or not. */
   val imported: Boolean = false,
 
+  /** Whether the model was added manually by the user from HuggingFace. */
+  val isUserHFModel: Boolean = false,
+
   /** A map of model capability to the task type ids that the model capability is allowed for. */
   val capabilityToTaskTypes: Map<ModelCapability, List<String>> = mapOf(),
 
