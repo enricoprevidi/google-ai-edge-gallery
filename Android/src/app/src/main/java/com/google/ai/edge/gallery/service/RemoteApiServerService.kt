@@ -287,6 +287,9 @@ class RemoteApiServerService : Service() {
       sendJson(out, 400, """{"error":{"message":"messages array is required"}}""")
       return
     }
+    val requestMaxTokens = body.get("max_tokens")?.let {
+      runCatching { it.asInt }.getOrNull()
+    }
 
     // Flatten OpenAI messages into a single prompt + system instruction.
     val systemSb = StringBuilder()
@@ -306,6 +309,26 @@ class RemoteApiServerService : Service() {
     convoSb.append("Assistant: ")
     val prompt = convoSb.toString()
     val systemInstruction = systemSb.toString().ifBlank { null }
+
+    // Soft input-length guard. The engine's prefill cache has a hard limit
+    // (32K for Gemma-4 family). We use ~4 chars-per-token as a conservative
+    // estimate and reject before crashing the engine mid-stream.
+    //
+    // Layout of a 32K KV cache: [ system + prompt | response ]
+    //   responseBudget  = max_tokens from request, else cfg.maxTokens, capped at 4096
+    //   promptBudget    = 32000 - responseBudget - 512 (safety)
+    val approxTokens = (prompt.length + (systemInstruction?.length ?: 0)) / 4
+    val responseBudget = (requestMaxTokens ?: cfg.maxTokens).coerceIn(64, 4096)
+    val promptBudget = (32_000 - responseBudget - 512).coerceAtLeast(2_000)
+    if (approxTokens > promptBudget) {
+      Log.w(TAG, "Rejecting oversized prompt: ~$approxTokens tokens > $promptBudget (response budget=$responseBudget)")
+      sendJson(
+        out,
+        400,
+        """{"error":{"message":"Prompt too long (~$approxTokens tokens, limit $promptBudget with $responseBudget reserved for response). Trim the conversation history or reduce file context.","type":"context_length_exceeded","code":"context_length_exceeded"}}""",
+      )
+      return
+    }
 
     // Serialize all inference through the mutex.
     runBlocking {
