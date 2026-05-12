@@ -804,12 +804,6 @@ fun AgentChatScreen(
       )
     }
     var expandedSpecialist by remember { mutableStateOf<String?>(null) }
-    // Tracks which AgentType slot is currently being edited inside the expanded specialist.
-    var editedAgentType by remember {
-      mutableStateOf<com.google.ai.edge.gallery.customtasks.orchestrator.AgentType>(
-        com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.MOBILE_AGENT
-      )
-    }
 
     fun ensureSpecialistLoaded(name: String) {
       if (tempSpecialistGroups.containsKey(name)) return
@@ -933,46 +927,35 @@ fun AgentChatScreen(
             }
             if (checked && expandedSpecialist == m.name) {
               val perAgent = tempSpecialistGroups[m.name] ?: emptyMap()
+              // Show one flat checkbox list per specialist. The same set is applied to every
+              // AgentType slot below — the planner still dispatches per AgentType, but the
+              // specialist exposes a single user-configured tool surface.
+              val union: Set<com.google.ai.edge.gallery.customtasks.orchestrator.ToolGroup> =
+                perAgent.values.fold(emptySet()) { acc, s -> acc + s }
+              val validGroups =
+                com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
+                  .validFor(com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.MOBILE_AGENT)
               Column(
                 modifier = Modifier.padding(start = 24.dp).fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
               ) {
-                // Compact AgentType chip row — pick which slot to edit.
-                Row(
-                  modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                  horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                  for (agentType in com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.values()) {
-                    FilterChip(
-                      selected = editedAgentType == agentType,
-                      onClick = { editedAgentType = agentType },
-                      label = {
-                        Text(agentType.displayName, style = MaterialTheme.typography.labelSmall)
-                      },
-                    )
-                  }
-                }
-
-                // Header + Reset for the currently-selected AgentType slot.
-                val validGroups =
-                  com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
-                    .validFor(editedAgentType)
-                val current = perAgent[editedAgentType] ?: emptySet()
                 Row(verticalAlignment = Alignment.CenterVertically) {
                   Text(
-                    "${editedAgentType.displayName} tools",
+                    "Tools",
                     style = MaterialTheme.typography.bodySmall,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                   )
                   TextButton(
                     onClick = {
-                      val defaults =
-                        com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
-                          .defaultsFor(editedAgentType)
-                      val updated = perAgent.toMutableMap().apply {
-                        put(editedAgentType, defaults)
-                      }
+                      val defaultsUnion: Set<com.google.ai.edge.gallery.customtasks.orchestrator.ToolGroup> =
+                        com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.values()
+                          .fold(emptySet()) { acc, at ->
+                            acc + com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
+                              .defaultsFor(at)
+                          }
+                      val updated = com.google.ai.edge.gallery.customtasks.orchestrator.AgentType
+                        .values().associateWith { defaultsUnion }
                       tempSpecialistGroups = tempSpecialistGroups + (m.name to updated)
                     }
                   ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
@@ -980,12 +963,11 @@ fun AgentChatScreen(
                 for (group in validGroups) {
                   Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
-                      checked = current.contains(group),
+                      checked = union.contains(group),
                       onCheckedChange = { c ->
-                        val nextSet = if (c) current + group else current - group
-                        val updated = perAgent.toMutableMap().apply {
-                          put(editedAgentType, nextSet)
-                        }
+                        val nextUnion = if (c) union + group else union - group
+                        val updated = com.google.ai.edge.gallery.customtasks.orchestrator.AgentType
+                          .values().associateWith { nextUnion }
                         tempSpecialistGroups = tempSpecialistGroups + (m.name to updated)
                       },
                     )

@@ -158,27 +158,13 @@ data class SpecialistToolsConfig(val perAgentType: Map<AgentType, Set<ToolGroup>
     perAgentType[agentType] ?: defaultsFor(agentType)
 
   companion object {
-    /** Tool groups that make sense for each [AgentType] specialist slot. */
-    fun validFor(agentType: AgentType): Set<ToolGroup> = when (agentType) {
-      // Specialists never get the DISPATCH tool — only the planner dispatches.
-      AgentType.MOBILE_AGENT -> setOf(
-        ToolGroup.MOBILE_AGENT, ToolGroup.MOBILE_ACTIONS, ToolGroup.WORKSPACE,
-        ToolGroup.APP_LAUNCHER, ToolGroup.SKILL_EXEC, ToolGroup.SKILL_CREATOR,
-      )
-      AgentType.APP_LAUNCHER -> setOf(
-        ToolGroup.APP_LAUNCHER, ToolGroup.MOBILE_AGENT, ToolGroup.MOBILE_ACTIONS,
-        ToolGroup.WORKSPACE, ToolGroup.SKILL_EXEC,
-      )
-      AgentType.WORKSPACE_AGENT -> setOf(
-        ToolGroup.WORKSPACE, ToolGroup.SKILL_EXEC, ToolGroup.SKILL_CREATOR,
-      )
-      AgentType.SKILL_CREATOR -> setOf(
-        ToolGroup.SKILL_CREATOR, ToolGroup.WORKSPACE, ToolGroup.SKILL_EXEC,
-      )
-      AgentType.SKILL_AGENT -> setOf(
-        ToolGroup.SKILL_EXEC, ToolGroup.WORKSPACE, ToolGroup.SKILL_CREATOR,
-      )
-    }
+    /**
+     * Tool groups that can be assigned to a specialist slot. Every non-[ToolGroup.DISPATCH] group
+     * is valid for every [AgentType] — the [AgentType] only drives the *default* selection and the
+     * dispatch routing, not which tools the user is allowed to attach to that slot.
+     */
+    fun validFor(@Suppress("UNUSED_PARAMETER") agentType: AgentType): Set<ToolGroup> =
+      ToolGroup.values().toSet() - ToolGroup.DISPATCH
 
     /**
      * Historical defaults for each [AgentType] specialist slot — matches the hard-coded mapping
