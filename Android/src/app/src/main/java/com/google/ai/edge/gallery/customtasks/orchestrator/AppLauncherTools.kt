@@ -39,10 +39,20 @@ class AppLauncherTools(
 
   @Tool(
     description =
-      "Lists all user-installed apps on the device. Returns a list of app names and package names."
+      "Lists user-installed apps on the device, filtered by a name query. " +
+        "Always pass a non-empty `query` substring (e.g. 'spotify', 'maps') — calling with an " +
+        "empty query truncates the result and may miss the target app. Returns up to 20 matches " +
+        "as {name, packageName}."
   )
-  fun listInstalledApps(): Map<String, Any> {
-    Log.d(TAG, "listInstalledApps")
+  fun listInstalledApps(
+    @ToolParam(
+      description =
+        "Case-insensitive substring matched against the app's display name (e.g. 'spotify'). " +
+          "Pass an empty string only as a last resort to browse the first 20 installed apps."
+    )
+    query: String
+  ): Map<String, Any> {
+    Log.d(TAG, "listInstalledApps query=$query")
     return try {
       val pm = context.packageManager
       val flags =
@@ -51,17 +61,28 @@ class AppLauncherTools(
         } else {
           @Suppress("DEPRECATION") PackageManager.GET_META_DATA
         }
-      val apps =
+      val needle = query.trim().lowercase()
+      val all =
         pm.getInstalledApplications(flags)
           .filter { (it.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) == 0 }
           .map { info ->
-            mapOf(
-              "name" to (pm.getApplicationLabel(info).toString()),
-              "packageName" to info.packageName,
-            )
+            val name = pm.getApplicationLabel(info).toString()
+            name to info.packageName
           }
-          .sortedBy { it["name"] as String }
-      mapOf("count" to apps.size, "apps" to apps)
+          .sortedBy { it.first.lowercase() }
+      val filtered =
+        if (needle.isEmpty()) all
+        else all.filter { (name, pkg) ->
+          name.lowercase().contains(needle) || pkg.lowercase().contains(needle)
+        }
+      val capped = filtered.take(20)
+      val apps = capped.map { (name, pkg) -> mapOf("name" to name, "packageName" to pkg) }
+      mapOf(
+        "matched" to filtered.size,
+        "returned" to apps.size,
+        "totalInstalled" to all.size,
+        "apps" to apps,
+      )
     } catch (e: Exception) {
       mapOf("error" to (e.message ?: "Failed to list apps"))
     }
