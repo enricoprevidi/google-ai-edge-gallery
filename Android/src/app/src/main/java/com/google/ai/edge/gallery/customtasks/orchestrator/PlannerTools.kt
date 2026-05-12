@@ -82,19 +82,47 @@ class PlannerTools(
         )
     Log.d(TAG, "dispatchToAgent: type=$type model='$modelName' request=${request.take(100)}")
 
-    val (systemInstruction, tools) = buildSpecialistConfig(type)
+    // Resolve the specialist key BEFORE building the tool config so any per-model overrides
+    // configured by the user apply to the correct specialist (the resolver is tolerant of
+    // hallucinated model names — see [AgentModelPool.resolveSpecialistKey]).
+    var resolvedKey = agentModelPool.resolveSpecialistKey(modelName)
+
+    // Capability-aware routing: if the planner-named specialist has NO tools configured for
+    // the requested AgentType, fall through to the first specialist that does. Without this
+    // a small planner that hallucinates a model name (or picks a specialist whose tools have
+    // been intentionally disabled in the picker) silently dispatches to a no-op.
+    val initialGroups = groupsForSpecialist(resolvedKey, type)
+    if (initialGroups.isEmpty()) {
+      val betterKey = agentModelPool.specialists.keys.firstOrNull { key ->
+        key != resolvedKey && groupsForSpecialist(key, type).isNotEmpty()
+      }
+      if (betterKey != null) {
+        Log.d(
+          TAG,
+          "Re-routing dispatch from '$resolvedKey' to '$betterKey' " +
+            "(no tools configured for $type on the original specialist).",
+        )
+        OrchestratorStatus.addLog(
+          "system",
+          "rerouted ${type.id}: $resolvedKey \u2192 $betterKey (no tools on original)",
+        )
+        resolvedKey = betterKey
+      }
+    }
+
+    val (systemInstruction, tools, postProcessResult) = buildSpecialistConfig(type, resolvedKey)
     val resolvedSpecialist =
-      if (modelName.isNotBlank()) modelName else (agentModelPool.specialistRoster().firstOrNull() ?: "default")
+      resolvedKey ?: (agentModelPool.specialistRoster().firstOrNull() ?: "default")
     OrchestratorStatus.beginDispatch(
       agentType = agentType,
       specialistName = resolvedSpecialist,
       request = request,
     )
-    val result =
+    val rawResult =
       try {
         agentModelPool.dispatchBlocking(
           request = request,
-          preferredModelName = modelName,
+          preferredModelName = resolvedKey ?: modelName,
           systemInstruction = systemInstruction,
           tools = tools,
         )
@@ -103,11 +131,12 @@ class PlannerTools(
         OrchestratorStatus.addLog(agentType, "EXCEPTION: ${t.javaClass.simpleName}: ${t.message ?: "(no message)"}")
         "Error: ${t.javaClass.simpleName}: ${t.message ?: "unknown failure"}"
       }
+    val result = postProcessResult(rawResult)
     OrchestratorStatus.endDispatch(agentType = agentType, resultPreview = result)
     onActionTaken(DispatchAction(agentType = type, request = request, result = result))
     return mapOf(
       "agent" to type.displayName,
-      "model" to modelName,
+      "model" to (resolvedKey ?: modelName),
       "result" to result,
       "status" to "completed",
       "instruction_for_planner" to
@@ -115,120 +144,207 @@ class PlannerTools(
     )
   }
 
+  /**
+   * Returns the configured tool groups for a (specialist, [AgentType]) pair, applying the same
+   * fallback rules used in [buildSpecialistConfig]: per-model config wins, then per-AgentType
+   * defaults if no config exists, then intersected with the valid set for the slot. An empty
+   * result means the user explicitly cleared the slot.
+   */
+  private fun groupsForSpecialist(modelKey: String?, agentType: AgentType): Set<ToolGroup> {
+    if (modelKey == null) return emptySet()
+    val cfg = OrchestratorToolsConfig.loadSpecialist(context, modelKey)
+    return (cfg?.groupsFor(agentType) ?: SpecialistToolsConfig.defaultsFor(agentType))
+      .intersect(SpecialistToolsConfig.validFor(agentType))
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────
 
+  /**
+   * Builds the system prompt and tool list for a specialist dispatch.
+   *
+   * The tool surface is determined by the user's [SpecialistToolsConfig] for the resolved
+   * specialist [modelKey]. When no configuration exists (or the lookup fails), the historical
+   * defaults from [SpecialistToolsConfig.defaultsFor] are used — preserving today's behaviour
+   * for users that never visit the new picker.
+   */
   private fun buildSpecialistConfig(
-    agentType: AgentType
-  ): Pair<Contents, List<com.google.ai.edge.litertlm.ToolProvider>> {
+    agentType: AgentType,
+    modelKey: String?,
+  ): Triple<Contents, List<com.google.ai.edge.litertlm.ToolProvider>, (String) -> String> {
     val now = LocalDateTime.now()
     val dateTime = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"))
     val dayOfWeek = now.format(DateTimeFormatter.ofPattern("EEEE"))
     val baseCtx = "Current date/time: $dateTime ($dayOfWeek)."
 
-    return when (agentType) {
-      AgentType.MOBILE_AGENT -> {
-        val mobileTools = MobileAgentTools(context = context, onActionTaken = onActionTaken)
-        val prompt =
-          Contents.of(
-            listOf(
-              Content.Text("You are a mobile device control agent. $baseCtx"),
-              Content.Text(
-                "Perform the requested device action using the available tools. " +
-                  "For repeated flashlight patterns (SOS, distress signals, Morse), call " +
-                  "flashMorseCode(text, unitMs) instead of toggling the flashlight in a loop. " +
-                  "Return a brief confirmation of what was done."
-              ),
-            )
-          )
-        Pair(prompt, listOf(tool(mobileTools)))
-      }
+    // Default post-processor: pass the specialist's response through unchanged.
+    var postProcess: (String) -> String = { it }
 
-      AgentType.APP_LAUNCHER -> {
-        val launcherTools =
-          AppLauncherTools(context = context, onActionTaken = onActionTaken)
-        val prompt =
-          Contents.of(
-            listOf(
-              Content.Text("You are an app launcher agent. $baseCtx"),
-              Content.Text(
-                "List installed apps, launch apps, or send structured data to apps using the tools. " +
-                  "Return a brief confirmation of the action taken."
-              ),
-            )
-          )
-        Pair(prompt, listOf(tool(launcherTools)))
-      }
+    // Resolve the configured groups for (specialist, agent type) — falling back to defaults
+    // ONLY when no per-specialist config exists. If the user has explicitly cleared a slot
+    // (saved config with an empty set), respect that and dispatch with no tools — otherwise
+    // disabling tools in the UI would have no effect.
+    val groups: Set<ToolGroup> = groupsForSpecialist(modelKey, agentType)
 
-      AgentType.WORKSPACE_AGENT -> {
-        val ws = WorkspaceTools(
-          context = context,
-          workspaceUriProvider = workspaceUri,
-          onFileRead = { path -> onActionTaken(WorkspaceReadAction(path)) },
-          onFileWritten = { path -> onActionTaken(WorkspaceWriteAction(path)) },
+    // ── Special case: MobileActions-270M ─────────────────────────────────────────────
+    // This model is fine-tuned ONLY on its tiny prompt + the MobileActionsTools surface. The
+    // verbose V2 specialist prompt (role line + per-group tool descriptions) derails its
+    // function-calling head and the model just emits prose. When the resolved specialist is
+    // that model, replace the prompt + tools with the fine-tuned ones — regardless of which
+    // ToolGroup checkboxes are configured for the slot.
+    //
+    // CRUCIAL: MobileActionsTools' @Tool methods only emit Action events; they don't toggle
+    // the hardware. The chat screen subscribes to [MobileActionAgentAction] and calls
+    // mobileActionsViewModel.performAction(...), which physically flips the flashlight, opens
+    // settings, etc. So we must wire onFunctionCalled through agentTools.sendAction — exactly
+    // like the planner-as-MobileActions path in OrchestratorV2TaskModule. Without this the
+    // specialist appears to "succeed" but nothing happens on the device.
+    if (modelKey?.contains("MobileActions", ignoreCase = true) == true) {
+      val mobileActionsPrompt =
+        com.google.ai.edge.gallery.customtasks.mobileactions.getSystemPrompt()
+      // Track the actions emitted during THIS dispatch so we can return a clean, deterministic
+      // result string to the planner. The fine-tuned MobileActions-270M's TEXT output is often
+      // garbage tokens (e.g. "holders_holders_function_text..."), even when the function calls
+      // themselves are correct. Feeding that back to the planner makes small planner models
+      // loop calling dispatchToAgent until they hit the engine's recurring-tool-call cap.
+      val capturedActions = mutableListOf<String>()
+      val mobileActionsTool = tool(
+        com.google.ai.edge.gallery.customtasks.mobileactions.MobileActionsTools(
+          onFunctionCalled = { mobileAction ->
+            val actionName = mobileAction::class.simpleName ?: mobileAction.toString().take(40)
+            capturedActions.add(actionName)
+            OrchestratorStatus.addLog("mobile_actions", mobileAction.toString().take(120))
+            agentTools.sendAction(
+              com.google.ai.edge.gallery.customtasks.agentchat.MobileActionAgentAction(mobileAction)
+            )
+            onActionTaken(
+              DispatchAction(
+                agentType = agentType,
+                request = mobileAction.toString().take(120),
+                result = "(mobile action emitted)",
+              )
+            )
+          }
         )
-        val prompt =
-          Contents.of(
-            listOf(
-              Content.Text(
-                "You are a workspace file agent. $baseCtx " +
-                  "Workspace root: ${ws.getWorkspacePath()}."
-              ),
-              Content.Text(
-                "Manage files in the workspace using the available tools. " +
-                  "For write operations, prefer creating files in appropriate subdirectories. " +
-                  "Return a brief summary of all actions taken."
-              ),
-            )
-          )
-        Pair(prompt, listOf(tool(ws)))
+      )
+      postProcess = { _ ->
+        if (capturedActions.isEmpty()) "No mobile action was performed."
+        else "Performed: ${capturedActions.joinToString(", ")}."
       }
+      return Triple(mobileActionsPrompt, listOf(mobileActionsTool), postProcess)
+    }
 
-      AgentType.SKILL_CREATOR -> {
-        val skillCreator =
-          SkillCreatorTools(
+    // Configure the shared AgentTools so it can resolve skill URLs (cheap; idempotent).
+    agentTools.context = context
+    agentTools.skillManagerViewModel = skillManagerViewModel
+
+    // Lazily construct each ToolSet only when its group is actually selected.
+    val providers = mutableListOf<com.google.ai.edge.litertlm.ToolProvider>()
+    val toolDescriptions = mutableListOf<String>()
+    for (group in groups) {
+      when (group) {
+        ToolGroup.MOBILE_AGENT -> {
+          providers.add(tool(MobileAgentTools(context = context, onActionTaken = onActionTaken)))
+          toolDescriptions.add(
+            "- Mobile agent: turnOnFlashlight, turnOffFlashlight, flashMorseCode, createContact, " +
+              "sendEmail, sendSms, openMap, openWifiSettings, createCalendarEvent. For repeated " +
+              "flashlight patterns (SOS / Morse), call flashMorseCode(text, unitMs) instead of " +
+              "toggling in a loop."
+          )
+        }
+        ToolGroup.APP_LAUNCHER -> {
+          providers.add(
+            tool(AppLauncherTools(context = context, onActionTaken = onActionTaken))
+          )
+          toolDescriptions.add(
+            "- App launcher: listInstalledApps, launchApp, sendIntent."
+          )
+        }
+        ToolGroup.WORKSPACE -> {
+          val ws = WorkspaceTools(
             context = context,
-            skillManagerViewModel = skillManagerViewModel,
-            onSkillCreated = { name ->
-              onActionTaken(SkillCreatedAction(skillName = name))
-            },
+            workspaceUriProvider = workspaceUri,
+            onFileRead = { path -> onActionTaken(WorkspaceReadAction(path)) },
+            onFileWritten = { path -> onActionTaken(WorkspaceWriteAction(path)) },
           )
-        val prompt =
-          Contents.of(
-            listOf(
-              Content.Text("You are a skill creator agent. $baseCtx"),
-              Content.Text(
-                "Create new skills and import them into the skill library using the available tools. " +
-                  "For JS skills, generate complete, working index.html content. " +
-                  "Return the name of the created skill and a brief description."
-              ),
+          providers.add(tool(ws))
+          toolDescriptions.add(
+            "- Workspace files: listFiles, readFile, writeFile, createDirectory, deleteFile " +
+              "(workspace root: ${ws.getWorkspacePath()})."
+          )
+        }
+        ToolGroup.SKILL_CREATOR -> {
+          providers.add(
+            tool(
+              SkillCreatorTools(
+                context = context,
+                skillManagerViewModel = skillManagerViewModel,
+                onSkillCreated = { name -> onActionTaken(SkillCreatedAction(skillName = name)) },
+              )
             )
           )
-        Pair(prompt, listOf(tool(skillCreator)))
-      }
-
-      AgentType.SKILL_AGENT -> {
-        // Configure the shared AgentTools so it can resolve skill URLs.
-        agentTools.context = context
-        agentTools.skillManagerViewModel = skillManagerViewModel
-
-        val availableSkills = skillManagerViewModel.getSelectedSkillsNamesAndDescriptions()
-          .ifEmpty { "(none installed)" }
-        val prompt =
-          Contents.of(
-            listOf(
-              Content.Text("You are a skill execution agent. $baseCtx"),
-              Content.Text(
-                "You can execute installed skills using the available tools:\n" +
-                  "- loadSkill(skillName): loads a skill and returns its instructions.\n" +
-                  "- runJs(skillName, scriptName, data): executes a skill's JavaScript and returns the result.\n" +
-                  "\nAvailable skills:\n$availableSkills\n" +
-                  "\nFor query-wikipedia, call: loadSkill(\"query-wikipedia\") then runJs(\"query-wikipedia\", \"index.html\", <json-data>).\n" +
-                  "For all skills the scriptName is typically \"index.html\". Always follow the instructions returned by loadSkill for the correct data format."
-              ),
+          toolDescriptions.add(
+            "- Skill creator: createTextSkill, createJsSkill, listAvailableSkills. For JS skills, " +
+              "generate complete working index.html content."
+          )
+        }
+        ToolGroup.SKILL_EXEC -> {
+          val availableSkills = skillManagerViewModel.getSelectedSkillsNamesAndDescriptions()
+            .ifEmpty { "(none installed)" }
+          providers.add(tool(agentTools))
+          toolDescriptions.add(
+            "- Skill execution: loadSkill(skillName), runJs(skillName, scriptName, data). " +
+              "Available skills:\n$availableSkills"
+          )
+        }
+        ToolGroup.MOBILE_ACTIONS -> {
+          providers.add(
+            tool(
+              com.google.ai.edge.gallery.customtasks.mobileactions.MobileActionsTools(
+                onFunctionCalled = { mobileAction ->
+                  onActionTaken(
+                    DispatchAction(
+                      agentType = agentType,
+                      request = mobileAction.toString().take(120),
+                      result = "(mobile action emitted)",
+                    )
+                  )
+                }
+              )
             )
           )
-        Pair(prompt, listOf(tool(agentTools)))
+          toolDescriptions.add(
+            "- Mobile actions: turnOnFlashlight, turnOffFlashlight, createContact, sendEmail, " +
+              "sendSms, openMap, openWifiSettings, createCalendarEvent."
+          )
+        }
+        ToolGroup.DISPATCH -> {
+          // Specialists never get the planner's dispatch tool — guarded by validFor() above
+          // but defended in depth here so a misconfigured prefs file can't recurse forever.
+        }
       }
     }
+
+    val role = when (agentType) {
+      AgentType.MOBILE_AGENT -> "You are a mobile device control agent."
+      AgentType.APP_LAUNCHER -> "You are an app launcher agent."
+      AgentType.WORKSPACE_AGENT -> "You are a workspace file agent."
+      AgentType.SKILL_CREATOR -> "You are a skill creator agent."
+      AgentType.SKILL_AGENT -> "You are a skill execution agent."
+    }
+
+    val prompt = Contents.of(
+      listOf(
+        Content.Text("$role $baseCtx"),
+        Content.Text(
+          "Use the tools below when they apply. If NONE of the available tools fits the " +
+            "request (e.g. the user asks for arithmetic, a definition, a translation, or any " +
+            "other reasoning that doesn't require an external action), answer directly from " +
+            "your own knowledge in one short sentence — do NOT refuse and do NOT mention the " +
+            "tool list. Otherwise, perform the action and return a brief summary of what was " +
+            "done.\n\n" + toolDescriptions.joinToString("\n")
+        ),
+      )
+    )
+    return Triple(prompt, providers, postProcess)
   }
 }

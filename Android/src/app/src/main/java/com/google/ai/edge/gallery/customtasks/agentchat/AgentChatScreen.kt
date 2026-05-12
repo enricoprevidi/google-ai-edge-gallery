@@ -55,11 +55,13 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -158,6 +160,8 @@ fun AgentChatScreen(
   var showSpecialistsSheet by remember { mutableStateOf(false) }
   // Status bottom sheet (planner/specialist/RAM details) for the V2 Orchestrator.
   var showStatusSheet by remember { mutableStateOf(false) }
+  // Test-prompts bottom sheet — V2 Orchestrator only.
+  var showTestsSheet by remember { mutableStateOf(false) }
 
   // Workspace selector state — only meaningful for the V2 (Multi-Agent Skills) task. The URI is
   // shared with the Multi-Agent Orchestrator via the same SharedPreferences key.
@@ -229,6 +233,13 @@ fun AgentChatScreen(
               Spacer(modifier = Modifier.width(4.dp))
               Text("Specialists", fontSize = 12.sp)
             }
+            FilledTonalButton(
+              onClick = { showTestsSheet = true },
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+              modifier = Modifier.height(32.dp),
+            ) {
+              Text("Tests", fontSize = 12.sp)
+            }
             OrchestratorStatusChip(onClick = { showStatusSheet = true })
           }
         }
@@ -280,6 +291,21 @@ fun AgentChatScreen(
       }
 
       updateProgressPanel(viewModel = viewModel, model = model, agentTools = agentTools)
+
+      // Surface the planner's final user-facing reply in the Orchestrator status panel so the
+      // operator can correlate "user → planner dispatches → planner reply" in one place.
+      if (taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+        val finalText = viewModel
+          .getLastMessageWithTypeAndSide(model, ChatMessageType.TEXT, ChatSide.AGENT)
+          as? ChatMessageText
+        val plannerReply = finalText?.content?.trim()
+        if (!plannerReply.isNullOrEmpty()) {
+          com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.addLog(
+            "planner reply",
+            plannerReply.take(400),
+          )
+        }
+      }
     },
     onResetSessionClickedOverride = { task, model ->
       resetSessionWithCurrentSkills(
@@ -759,6 +785,45 @@ fun AgentChatScreen(
       mutableStateOf(if (savedSet.isEmpty()) allDownloadedNames else savedSet)
     }
 
+    // Planner tools state — initialised from saved prefs (or the historical default).
+    val plannerHasSpecialists = tempSelected.isNotEmpty()
+    var tempPlannerGroups by remember {
+      mutableStateOf(
+        com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorToolsConfig
+          .loadPlanner(context)?.groups
+          ?: com.google.ai.edge.gallery.customtasks.orchestrator.PlannerToolsConfig
+            .defaultFor(plannerHasSpecialists).groups
+      )
+    }
+
+    // Per-specialist tool state — keyed by original model name. Lazily populated from prefs the
+    // first time a specialist is expanded so we don't load every model's config up-front.
+    var tempSpecialistGroups by remember {
+      mutableStateOf<Map<String, Map<com.google.ai.edge.gallery.customtasks.orchestrator.AgentType, Set<com.google.ai.edge.gallery.customtasks.orchestrator.ToolGroup>>>>(
+        emptyMap()
+      )
+    }
+    var expandedSpecialist by remember { mutableStateOf<String?>(null) }
+    // Tracks which AgentType slot is currently being edited inside the expanded specialist.
+    var editedAgentType by remember {
+      mutableStateOf<com.google.ai.edge.gallery.customtasks.orchestrator.AgentType>(
+        com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.MOBILE_AGENT
+      )
+    }
+
+    fun ensureSpecialistLoaded(name: String) {
+      if (tempSpecialistGroups.containsKey(name)) return
+      val cfg =
+        com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorToolsConfig
+          .loadSpecialist(context, name)
+      val map = com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.values().associateWith { at ->
+        cfg?.groupsFor(at)
+          ?: com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
+            .defaultsFor(at)
+      }
+      tempSpecialistGroups = tempSpecialistGroups + (name to map)
+    }
+
     ModalBottomSheet(
       onDismissRequest = { showSpecialistsSheet = false },
       sheetState = sheetState,
@@ -772,48 +837,194 @@ fun AgentChatScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
       ) {
         Text(
-          "Specialist Models",
+          "Specialist Models & Tools",
           style = MaterialTheme.typography.titleMedium,
           fontWeight = FontWeight.Bold,
         )
         HorizontalDivider()
+
+        // ── Planner tools ───────────────────────────────────────────────────────
         Text(
           "Planner: ${currentModel.name}",
+          style = MaterialTheme.typography.bodyMedium,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          "Tool groups exposed to the planner model. \"Dispatch\" requires at least one " +
+            "specialist model below.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        for (group in com.google.ai.edge.gallery.customtasks.orchestrator.PlannerToolsConfig.VALID) {
+          val isDispatch =
+            group == com.google.ai.edge.gallery.customtasks.orchestrator.ToolGroup.DISPATCH
+          val enabled = !(isDispatch && tempSelected.isEmpty())
+          Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+              checked = tempPlannerGroups.contains(group) && enabled,
+              enabled = enabled,
+              onCheckedChange = { checked ->
+                tempPlannerGroups =
+                  if (checked) tempPlannerGroups + group else tempPlannerGroups - group
+              },
+            )
+            Column {
+              Text(group.displayName, style = MaterialTheme.typography.bodyMedium)
+              Text(
+                group.description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+          }
+        }
+
+        HorizontalDivider()
+
+        // ── Specialist roster ───────────────────────────────────────────────────
         Text(
-          "Select which downloaded models are available as specialist agents in the model pool. " +
-            "All checked models will be offered to the planner via dispatchToAgent.",
+          "Specialist Models",
+          style = MaterialTheme.typography.bodyMedium,
+          fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+          "Select downloaded models to include in the dispatch pool, then optionally edit " +
+            "the tool groups available to each specialist per agent type.",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         if (downloadedSpecialists.isEmpty()) {
           Text(
-            "No other models downloaded. The planner will use its own weights as the only specialist.",
+            "No other models downloaded. The planner will run without specialists.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
         } else {
           for (m in downloadedSpecialists) {
+            val checked = tempSelected.contains(m.name)
             Row(verticalAlignment = Alignment.CenterVertically) {
               Checkbox(
-                checked = tempSelected.contains(m.name),
-                onCheckedChange = { checked ->
+                checked = checked,
+                onCheckedChange = { c ->
                   tempSelected =
-                    if (checked) tempSelected + m.name else tempSelected - m.name
+                    if (c) tempSelected + m.name else tempSelected - m.name
+                  if (!c && expandedSpecialist == m.name) expandedSpecialist = null
                 },
               )
-              Text(m.name, style = MaterialTheme.typography.bodyMedium)
+              Text(
+                m.name,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+              )
+              if (checked) {
+                TextButton(
+                  onClick = {
+                    if (expandedSpecialist == m.name) {
+                      expandedSpecialist = null
+                    } else {
+                      ensureSpecialistLoaded(m.name)
+                      expandedSpecialist = m.name
+                    }
+                  }
+                ) {
+                  Text(if (expandedSpecialist == m.name) "Hide tools" else "Edit tools")
+                }
+              }
+            }
+            if (checked && expandedSpecialist == m.name) {
+              val perAgent = tempSpecialistGroups[m.name] ?: emptyMap()
+              Column(
+                modifier = Modifier.padding(start = 24.dp).fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+              ) {
+                // Compact AgentType chip row — pick which slot to edit.
+                Row(
+                  modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                  horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                  for (agentType in com.google.ai.edge.gallery.customtasks.orchestrator.AgentType.values()) {
+                    FilterChip(
+                      selected = editedAgentType == agentType,
+                      onClick = { editedAgentType = agentType },
+                      label = {
+                        Text(agentType.displayName, style = MaterialTheme.typography.labelSmall)
+                      },
+                    )
+                  }
+                }
+
+                // Header + Reset for the currently-selected AgentType slot.
+                val validGroups =
+                  com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
+                    .validFor(editedAgentType)
+                val current = perAgent[editedAgentType] ?: emptySet()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  Text(
+                    "${editedAgentType.displayName} tools",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                  )
+                  TextButton(
+                    onClick = {
+                      val defaults =
+                        com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig
+                          .defaultsFor(editedAgentType)
+                      val updated = perAgent.toMutableMap().apply {
+                        put(editedAgentType, defaults)
+                      }
+                      tempSpecialistGroups = tempSpecialistGroups + (m.name to updated)
+                    }
+                  ) { Text("Reset", style = MaterialTheme.typography.labelSmall) }
+                }
+                for (group in validGroups) {
+                  Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                      checked = current.contains(group),
+                      onCheckedChange = { c ->
+                        val nextSet = if (c) current + group else current - group
+                        val updated = perAgent.toMutableMap().apply {
+                          put(editedAgentType, nextSet)
+                        }
+                        tempSpecialistGroups = tempSpecialistGroups + (m.name to updated)
+                      },
+                    )
+                    Text(group.displayName, style = MaterialTheme.typography.bodySmall)
+                  }
+                }
+              }
             }
           }
         }
+
         Button(
           onClick = {
-            // Empty set = "all downloaded": store empty string so the V2 task uses everything.
+            // ── Specialist names CSV (existing behaviour) ──
             val csv =
               if (tempSelected == allDownloadedNames) "" else tempSelected.joinToString(",")
             workspacePrefs.edit().putString("v2_specialist_names", csv).apply()
+
+            // ── Planner tools ──
+            com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorToolsConfig
+              .savePlanner(
+                context,
+                com.google.ai.edge.gallery.customtasks.orchestrator.PlannerToolsConfig(
+                  tempPlannerGroups
+                ),
+              )
+
+            // ── Specialist tools (only the ones the user touched) ──
+            val merged =
+              com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorToolsConfig
+                .loadAllSpecialists(context)
+                .toMutableMap()
+            for ((modelName, perAgent) in tempSpecialistGroups) {
+              merged[modelName] =
+                com.google.ai.edge.gallery.customtasks.orchestrator.SpecialistToolsConfig(perAgent)
+            }
+            com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorToolsConfig
+              .saveAllSpecialists(context, merged)
+
             showSpecialistsSheet = false
             modelManagerViewModel.initializeModel(context, task, currentModel, force = true)
           },
@@ -835,7 +1046,97 @@ fun AgentChatScreen(
       OrchestratorStatusPanel()
     }
   }
+
+  // ── Test prompts sheet (V2 Orchestrator only) ───────────────────────────────────
+  if (showTestsSheet && taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val modelManagerUiState by modelManagerViewModel.uiState.collectAsState()
+    val currentModel = modelManagerUiState.selectedModel
+    ModalBottomSheet(
+      onDismissRequest = { showTestsSheet = false },
+      sheetState = sheetState,
+    ) {
+      Column(
+        modifier =
+          Modifier.fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Text(
+          "Test prompts",
+          style = MaterialTheme.typography.titleMedium,
+          fontWeight = FontWeight.Bold,
+        )
+        Text(
+          "Tap a prompt to send it as a chat message. Useful for verifying planner / specialist routing.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider()
+        for (test in V2_TEST_PROMPTS) {
+          FilledTonalButton(
+            onClick = {
+              sendMessageTrigger =
+                SendMessageTrigger(
+                  model = currentModel,
+                  messages = listOf(ChatMessageText(content = test.prompt, side = ChatSide.USER)),
+                )
+              showTestsSheet = false
+            },
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+          ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+              Text(
+                test.label,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+              )
+              Text(
+                test.prompt,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+              )
+            }
+          }
+        }
+      }
+    }
+  }
 }
+
+/** A predefined test prompt for the V2 Orchestrator. */
+private data class V2TestPrompt(val label: String, val prompt: String)
+
+/** Predefined prompts that exercise different planner / specialist routes. */
+private val V2_TEST_PROMPTS: List<V2TestPrompt> = listOf(
+  V2TestPrompt(
+    label = "Flashlight + arithmetic",
+    prompt = "switch the flashlight on, calculate 3 + 8, then switch the flashlight off",
+  ),
+  V2TestPrompt(
+    label = "SOS Morse code",
+    prompt = "send SOS via Morse code with the flashlight",
+  ),
+  V2TestPrompt(
+    label = "List installed apps",
+    prompt = "list the installed apps on this device",
+  ),
+  V2TestPrompt(
+    label = "Workspace listing",
+    prompt = "list the files in the workspace root",
+  ),
+  V2TestPrompt(
+    label = "Trivial reasoning (no tool)",
+    prompt = "what is the capital of France?",
+  ),
+  V2TestPrompt(
+    label = "Wikipedia skill",
+    prompt = "use the query-wikipedia skill to look up Ada Lovelace",
+  ),
+)
 
 @Composable
 private fun AgentDescription(title: String, body: String) {

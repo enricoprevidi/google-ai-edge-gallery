@@ -207,6 +207,21 @@ fun ChatViewWrapper(
     viewModel = viewModel,
     modelManagerViewModel = modelManagerViewModel,
     onSendMessage = { model, messages ->
+      // Surface the user's request in the Orchestrator status panel so the operator can see
+      // what the planner is reacting to (sits alongside the planner's dispatch logs).
+      if (taskId == BuiltInTaskId.LLM_ORCHESTRATOR_V2) {
+        val userText = messages
+          .filterIsInstance<com.google.ai.edge.gallery.ui.common.chat.ChatMessageText>()
+          .firstOrNull { it.side == com.google.ai.edge.gallery.ui.common.chat.ChatSide.USER }
+          ?.content
+          ?.trim()
+        if (!userText.isNullOrEmpty()) {
+          com.google.ai.edge.gallery.customtasks.orchestrator.OrchestratorStatus.addLog(
+            "user",
+            userText.take(300),
+          )
+        }
+      }
       for (message in messages) {
         viewModel.addMessage(model = model, message = message)
       }

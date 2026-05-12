@@ -85,41 +85,49 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
       textInputPlaceHolderRes = R.string.text_input_placeholder_llm_chat,
       defaultSystemPrompt =
         """
-        You are an AI assistant on an Android phone. You complete user tasks by calling tools directly. Output ONLY the final result, no thoughts or intermediate text.
+        You are a PLANNER on an Android phone. Your job is to DECOMPOSE the user's request into a SEQUENCE of small steps and execute them in order by calling tools. Output ONLY the final user-facing reply, no thoughts.
 
-        Choose ONE branch per user message and follow it exactly:
+        ── HOW TO PLAN ─────────────────────────────────────────────────────────────
+        1. Read the full user message. If it contains MULTIPLE actions joined by "then", "and", commas, or numbered steps, treat each as a SEPARATE step.
+        2. For EACH step, classify it independently using the categories below and execute it with ONE tool call (or answer it directly from your own knowledge if no tool applies).
+        3. Execute the steps STRICTLY in the order the user wrote them. Wait for each tool's result before moving on.
+        4. NEVER pass a compound request (multiple actions) into a single tool call or dispatchToAgent. The specialists are narrow and will fail.
+        5. After the last step, output ONE short plain-text summary covering every step's outcome. Then STOP.
 
-        BRANCH A — SKILL CREATION
-        Trigger: user asks to create / add / save / build a new skill.
-          - createTextSkill(name, skillMd) for persona / role-play / knowledge skills.
-          - createJsSkill(name, skillMd, indexHtmlContent) for JavaScript skills.
-          - After success, output ONLY: "Skill '<name>' created."
+        ── STEP CATEGORIES ─────────────────────────────────────────────────────────
+        Mobile / device action (flashlight, contacts, email, SMS, calendar, maps, WiFi, Morse):
+          → call turnOnFlashlight / turnOffFlashlight / flashMorseCode / createContact / sendEmail / sendSms / openMap / openWifiSettings / createCalendarEvent directly,
+            OR dispatchToAgent("mobile_agent", "<just this one action>", "") if a specialist is available and you cannot call the tool yourself.
 
-        BRANCH B — WORKSPACE FILES
-        Trigger: user asks to list, read, write, create, or delete files in the workspace.
-          - listFiles("") for the workspace root, or listFiles("sub/dir").
-          - readFile(path), writeFile(path, content), createDirectory(path), deleteFile(path).
-          - If a tool returns "Workspace not set", output: "Please pick a workspace folder via the Workspace button."
-          - Otherwise output a one-line confirmation (or the file content for reads).
+        Workspace file (list / read / write / create / delete):
+          → listFiles / readFile / writeFile / createDirectory / deleteFile,
+            OR dispatchToAgent("workspace_agent", "<just this one file action>", "").
 
-        BRANCH C — MOBILE / DEVICE ACTIONS
-        Trigger: user asks to control the device (flashlight, contacts, email, SMS, calendar, maps, WiFi).
-          - Call exactly ONE matching tool: turnOnFlashlight, turnOffFlashlight, flashMorseCode, createContact, sendEmail, sendSms, openMap, openWifiSettings, createCalendarEvent.
-          - Output a one-sentence confirmation.
+        Skill creation (user wants to create / add / save a new skill):
+          → createTextSkill / createJsSkill.
 
-        BRANCH D — EXECUTE A SKILL
-        Trigger: anything else.
-          1. Pick the most relevant skill from this list:
-             ___SKILLS___
-          2. Call load_skill(name) and follow its instructions.
-          3. If runJs is needed, call runJs(skillName, scriptName, data).
-          4. Output ONLY the final result.
+        Skill execution (anything else that matches an available skill):
+          → load_skill(name) then runJs(skillName, scriptName, data) if needed.
+            Available skills: ___SKILLS___
+            OR dispatchToAgent("skill_agent", "<one skill task>", "") / dispatchToAgent("skill_creator", "<one creation task>", "").
 
-        BRANCH E — DELEGATE TO ANOTHER MODEL (OPTIONAL)
-        Use ONLY when an independent specialist model exists in the pool AND it is clearly better suited.
-          - dispatchToAgent(agentType, request, modelName="").
-          - As soon as it returns "status":"completed", stop calling tools and reply with a short plain-text summary.
-        If you are unsure, prefer Branch A-D direct tools.
+        Reasoning / arithmetic / definition / translation / counting / general knowledge:
+          → DO NOT call any tool. DO NOT dispatch. Just compute or recall the answer yourself and remember it for the final summary.
+
+        ── DISPATCH RULES ──────────────────────────────────────────────────────────
+        - dispatchToAgent(agentType, request, modelName="") delegates ONE narrow sub-task to a specialist.
+          The runtime picks the model; always pass modelName="".
+          The "request" string must describe ONE action only — never include "then", "and", or multiple instructions.
+        - As soon as dispatchToAgent returns "status":"completed", continue with the NEXT user step (or finish if this was the last one). Do not re-dispatch the same step.
+
+        ── EXAMPLE ─────────────────────────────────────────────────────────────────
+        User: "Turn on the flashlight, then count from 1 to 5, then calculate 3+19, then turn the flashlight off."
+        Plan:
+          Step 1 (mobile)    → turnOnFlashlight() OR dispatchToAgent("mobile_agent", "Turn on the flashlight", "")
+          Step 2 (reasoning) → answer "1, 2, 3, 4, 5" mentally; no tool call.
+          Step 3 (reasoning) → answer "22" mentally; no tool call.
+          Step 4 (mobile)    → turnOffFlashlight() OR dispatchToAgent("mobile_agent", "Turn off the flashlight", "")
+          Final reply: "Flashlight toggled on and off. Count: 1, 2, 3, 4, 5. 3+19 = 22."
         """
           .trimIndent(),
     )
@@ -280,48 +288,41 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
       )
       OrchestratorStatus.setPlanner(model.name)
 
-      // Build the planner's tool surface. Direct toolsets (V2 parity) are always included so the
-      // planner can act on workspace / mobile / skills without an LLM hop. dispatchToAgent is
-      // additionally exposed only when there is at least one INDEPENDENT specialist model in the
-      // pool — otherwise the planner has nothing to dispatch to and including the tool would
-      // just confuse small models.
+      // Build the planner's tool surface. The set of available tool groups is built once from
+      // the locally constructed ToolSet instances; the actual subset exposed to the planner is
+      // driven by the user's [PlannerToolsConfig] (or the historical default). dispatchToAgent
+      // is only meaningful when the pool has at least one INDEPENDENT specialist model — when
+      // it doesn't, [ToolGroup.DISPATCH] is filtered out so small models aren't confused.
       val poolHasSpecialists = specialistEntries.isNotEmpty()
-      val plannerToolList: List<com.google.ai.edge.litertlm.ToolProvider> =
-        if (isMobileActionsModel) {
-          // MobileActions-270M is fine-tuned for a tiny tool surface; don't pollute it.
-          listOf(tool(mobileActionsTools))
-        } else {
-          val core = mutableListOf(
-            tool(workspaceTools),
-            tool(skillCreatorTools),
-            tool(mobileActionsTools),
-            tool(agentTools), // skill execution: load_skill, run_js, ...
-          )
-          if (poolHasSpecialists) core.add(tool(plannerTools))
-          core
-        }
-
-      val plannerToolNames =
-        if (isMobileActionsModel) {
-          listOf("MobileActions: turnOnFlashlight, turnOffFlashlight, ...")
-        } else {
-          val names = mutableListOf(
-            "workspace: listFiles, readFile, writeFile, createDirectory, deleteFile",
-            "skill_creator: createTextSkill, createJsSkill, listAvailableSkills",
-            "mobile_actions: turnOnFlashlight, turnOffFlashlight, createContact, sendEmail, ...",
-            "skill_exec: load_skill, run_js",
-          )
-          if (poolHasSpecialists) names.add("dispatchToAgent (delegate to specialist model)")
-          names
-        }
-      val specialistToolNames =
-        listOf(
-          "mobile_agent: turnOnFlashlight, turnOffFlashlight, flashMorseCode, createContact, sendEmail, sendSms, openMap, ...",
-          "app_launcher: listInstalledApps, launchApp, sendIntent",
-          "workspace_agent: listFiles, readFile, writeFile, createDirectory, deleteFile",
-          "skill_creator: createTextSkill, createJsSkill, listAvailableSkills",
-          "skill_agent: loadSkill, runJs",
+      val plannerGroupProviders: Map<ToolGroup, com.google.ai.edge.litertlm.ToolProvider> =
+        mapOf(
+          ToolGroup.WORKSPACE to tool(workspaceTools),
+          ToolGroup.SKILL_CREATOR to tool(skillCreatorTools),
+          ToolGroup.MOBILE_ACTIONS to tool(mobileActionsTools),
+          ToolGroup.SKILL_EXEC to tool(agentTools), // load_skill, run_js, ...
+          ToolGroup.DISPATCH to tool(plannerTools),
         )
+
+      val plannerGroups: Set<ToolGroup> = when {
+        // MobileActions-270M is fine-tuned for a tiny tool surface; don't pollute it regardless
+        // of saved prefs.
+        isMobileActionsModel -> setOf(ToolGroup.MOBILE_ACTIONS)
+        else -> {
+          val saved = OrchestratorToolsConfig.loadPlanner(context)
+          val effective = (saved?.groups ?: PlannerToolsConfig.defaultFor(poolHasSpecialists).groups)
+            .intersect(PlannerToolsConfig.VALID)
+            .toMutableSet()
+          if (!poolHasSpecialists) effective.remove(ToolGroup.DISPATCH)
+          effective
+        }
+      }
+
+      val plannerToolList: List<com.google.ai.edge.litertlm.ToolProvider> =
+        plannerGroups.mapNotNull { plannerGroupProviders[it] }
+
+      val plannerToolNames: List<String> = plannerGroups.map {
+        "${it.displayName.lowercase().replace(' ', '_')}: ${it.description}"
+      }
       val modelEntries = mutableListOf(
         OrchestratorStatus.ModelEntry(
           name = model.name,
@@ -332,12 +333,18 @@ class OrchestratorV2Task @Inject constructor() : CustomTask {
         )
       )
       for (entry in specialistEntries.values) {
+        val baseName = entry.model.name.removeSuffix("-specialist")
+        val cfg = OrchestratorToolsConfig.loadSpecialist(context, baseName)
+        val labels = AgentType.values().map { agentType ->
+          val groups = cfg?.groupsFor(agentType) ?: SpecialistToolsConfig.defaultsFor(agentType)
+          "${agentType.id}: " + groups.joinToString(", ") { it.displayName }
+        }
         modelEntries.add(
           OrchestratorStatus.ModelEntry(
-            name = entry.model.name.removeSuffix("-specialist"),
+            name = baseName,
             role = "specialist",
             sharedWithPlanner = false,
-            tools = specialistToolNames,
+            tools = labels,
             sizeBytes = entry.model.totalBytes,
           )
         )

@@ -166,6 +166,24 @@ class AgentModelPool(
     }
 
   /**
+   * Tolerant resolution of a planner-supplied model name to a specialist [Map.Entry] of the
+   * pool. The lookup is exact-key first, then substring (any specialist whose key appears inside
+   * the requested string — small planners often hallucinate the verbose roster description into
+   * `modelName`), then falls back to the first specialist. Returns the **map key** (the
+   * user-facing original model name, without the internal `-specialist` suffix) so callers can
+   * use it for per-model configuration lookups.
+   */
+  fun resolveSpecialistKey(preferredName: String): String? {
+    if (specialists.isEmpty()) return null
+    if (specialists.containsKey(preferredName)) return preferredName
+    if (preferredName.isNotBlank()) {
+      val match = specialists.keys.firstOrNull { preferredName.contains(it) }
+      if (match != null) return match
+    }
+    return specialists.keys.firstOrNull()
+  }
+
+  /**
    * Dispatches a request to the best available specialist engine, chosen by [preferredModelName].
    *
    * Falls back to the first specialist in the pool if [preferredModelName] is not found.
@@ -184,16 +202,10 @@ class AgentModelPool(
     tools: List<ToolProvider>,
   ): String {
     // Tolerant lookup: small planners often hallucinate the verbose roster description into
-    // modelName. Match by exact key first, then by substring (any specialist whose name appears
-    // inside the requested string), then fall back to the first specialist.
-    val entry = run {
-      specialists[preferredModelName]?.let { return@run it }
-      if (preferredModelName.isNotBlank()) {
-        val match = specialists.entries.firstOrNull { (k, _) -> preferredModelName.contains(k) }
-        if (match != null) return@run match.value
-      }
-      specialists.values.firstOrNull()
-    } ?: run {
+    // modelName. Reuse the public resolver so callers (e.g. PlannerTools) can pre-resolve the
+    // same key to load per-model config.
+    val key = resolveSpecialistKey(preferredModelName)
+    val entry = key?.let { specialists[it] } ?: run {
       OrchestratorStatus.addLog("system", "dispatchBlocking: no specialists available")
       return "Error: no specialist models available in the pool."
     }
