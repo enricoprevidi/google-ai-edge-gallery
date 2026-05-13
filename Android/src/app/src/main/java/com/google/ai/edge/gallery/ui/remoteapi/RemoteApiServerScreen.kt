@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -43,6 +44,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -67,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import com.google.ai.edge.gallery.data.ModelDownloadStatusType
 import com.google.ai.edge.gallery.service.RemoteApiPrefs
 import com.google.ai.edge.gallery.service.RemoteApiServerHolder
+import com.google.ai.edge.gallery.service.RemoteApiServerLog
 import com.google.ai.edge.gallery.service.RemoteApiServerService
 import com.google.ai.edge.gallery.service.RemoteApiServerStatus
 import com.google.ai.edge.gallery.service.lanIpv4
@@ -74,6 +77,9 @@ import com.google.ai.edge.gallery.ui.modelmanager.ModelManagerViewModel
 import java.util.UUID
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -232,6 +238,17 @@ fun RemoteApiServerScreen(
             modifier = Modifier.fillMaxWidth(),
           )
 
+          OutlinedTextField(
+            value = cfg.contextSize.toString(),
+            onValueChange = { v ->
+              val n = v.toIntOrNull() ?: return@OutlinedTextField
+              cfg = cfg.copy(contextSize = n)
+            },
+            label = { Text("Engine context size (tokens) — restart to apply") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+          )
+
           Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth(),
@@ -304,6 +321,9 @@ fun RemoteApiServerScreen(
           )
         }
       }
+
+      // ── Control Panel: live log + current-context inspector ───────
+      ControlPanelCard()
     }
   }
 }
@@ -372,4 +392,181 @@ private fun CopyRow(label: String, value: String, context: Context) {
 private fun copyToClipboard(context: Context, label: String, value: String) {
   val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
   cm.setPrimaryClip(ClipData.newPlainText(label, value))
+}
+
+// ── Control Panel ────────────────────────────────────────────────────
+
+@Composable
+private fun ControlPanelCard() {
+  val context = LocalContext.current
+  val events by RemoteApiServerLog.events.collectAsState()
+  val currentRequest by RemoteApiServerLog.currentRequest.collectAsState()
+
+  Card(modifier = Modifier.fillMaxWidth()) {
+    Column(
+      modifier = Modifier.padding(16.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+          "Control Panel",
+          style = MaterialTheme.typography.titleMedium,
+          modifier = Modifier.weight(1f),
+        )
+        OutlinedButton(onClick = { RemoteApiServerLog.clearEvents() }) {
+          Text("Clear log")
+        }
+      }
+
+      // Current request snapshot
+      val snap = currentRequest
+      if (snap == null) {
+        Text(
+          "No requests yet. Start the server and send a request from your IDE.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      } else {
+        val usageRatio = if (snap.contextSizeTokens > 0) {
+          (snap.promptApproxTokens.toFloat() / snap.contextSizeTokens.toFloat())
+            .coerceIn(0f, 1f)
+        } else 0f
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+          Text(
+            "Request #${snap.requestId} • ${snap.path}" +
+              if (snap.streaming) " • stream" else " • buffered",
+            style = MaterialTheme.typography.labelLarge,
+          )
+          Text(
+            "Client: ${snap.clientHint.ifBlank { "—" }}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          Text(
+            "Tools advertised: ${snap.toolsCount} • Tool calls emitted: ${snap.toolCallsEmitted}",
+            style = MaterialTheme.typography.bodySmall,
+          )
+          Text(
+            "Prompt ≈ ${snap.promptApproxTokens} tok (${snap.promptCharCount} chars) " +
+              "/ context ${snap.contextSizeTokens} tok",
+            style = MaterialTheme.typography.bodySmall,
+          )
+          LinearProgressIndicator(
+            progress = { usageRatio },
+            modifier = Modifier.fillMaxWidth(),
+          )
+          Text(
+            "Response so far ≈ ${snap.responseApproxTokens} tok " +
+              "(${snap.responseCharCount} chars)",
+            style = MaterialTheme.typography.bodySmall,
+          )
+          val statusLine = when {
+            snap.error != null -> "Status: error — ${snap.error}"
+            snap.finishedAtMs != null ->
+              "Status: ${snap.finishReason ?: "done"} in ${snap.durationMs} ms"
+            else -> "Status: in progress…"
+          }
+          Text(statusLine, style = MaterialTheme.typography.bodySmall)
+        }
+
+        ExpandableTextSection(
+          title = "System prompt",
+          body = snap.systemInstruction,
+          context = context,
+        )
+        ExpandableTextSection(
+          title = "User prompt",
+          body = snap.prompt,
+          context = context,
+        )
+        ExpandableTextSection(
+          title = "Model response",
+          body = snap.response,
+          context = context,
+        )
+      }
+
+      Text(
+        "Event log (${events.size})",
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold,
+      )
+      if (events.isEmpty()) {
+        Text(
+          "Idle — no events yet.",
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      } else {
+        val fmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
+        Column(
+          modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 320.dp)
+            .verticalScroll(rememberScrollState())
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(8.dp),
+          verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+          // Newest first
+          events.asReversed().forEach { e ->
+            val color = when (e.level) {
+              RemoteApiServerLog.Level.ERROR -> MaterialTheme.colorScheme.error
+              RemoteApiServerLog.Level.WARN -> Color(0xFFE65100)
+              RemoteApiServerLog.Level.DEBUG -> MaterialTheme.colorScheme.onSurfaceVariant
+              else -> MaterialTheme.colorScheme.onSurface
+            }
+            val rid = e.requestId?.let { "#$it " } ?: ""
+            Text(
+              text = "${fmt.format(Date(e.timestampMs))} [${e.level.name.first()}] " +
+                "${e.category} $rid${e.message}",
+              style = MaterialTheme.typography.bodySmall.copy(
+                fontFamily = FontFamily.Monospace,
+              ),
+              color = color,
+            )
+          }
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ExpandableTextSection(
+  title: String,
+  body: String,
+  context: Context,
+) {
+  var expanded by remember { mutableStateOf(false) }
+  Column(
+    modifier = Modifier
+      .fillMaxWidth()
+      .background(MaterialTheme.colorScheme.surfaceVariant)
+      .padding(8.dp),
+    verticalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        "$title (${body.length} chars)",
+        style = MaterialTheme.typography.labelLarge,
+        modifier = Modifier.weight(1f),
+      )
+      if (body.isNotEmpty()) {
+        IconButton(onClick = { copyToClipboard(context, title, body) }) {
+          Icon(Icons.Rounded.ContentCopy, contentDescription = "Copy")
+        }
+      }
+      OutlinedButton(onClick = { expanded = !expanded }, enabled = body.isNotEmpty()) {
+        Text(if (expanded) "Hide" else "Show")
+      }
+    }
+    if (expanded) {
+      val preview = if (body.length > 8000) body.takeLast(8000) else body
+      Text(
+        if (body.length > 8000) "… (showing last 8000 chars)\n$preview" else preview,
+        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+      )
+    }
+  }
 }

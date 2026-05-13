@@ -22,9 +22,15 @@ object RemoteApiPrefs {
   private const val KEY_TOKEN = "api_token"
   private const val KEY_REQUIRE_TOKEN = "require_token"
   private const val KEY_MAX_TOKENS = "max_tokens"
+  private const val KEY_CONTEXT_SIZE = "context_size"
 
   const val DEFAULT_PORT = 8080
   const val DEFAULT_MAX_TOKENS = 2048
+
+  // Default engine context window. Continue.dev / Cursor / Aider system prompts
+  // routinely exceed 4-6K tokens; 16K leaves headroom for the assistant reply
+  // without blowing past what a phone can keep in the KV cache.
+  const val DEFAULT_CONTEXT_SIZE = 16384
 
   data class Config(
     val port: Int,
@@ -32,6 +38,7 @@ object RemoteApiPrefs {
     val apiToken: String,
     val requireToken: Boolean,
     val maxTokens: Int,
+    val contextSize: Int,
   )
 
   private fun prefs(context: Context): SharedPreferences =
@@ -50,6 +57,7 @@ object RemoteApiPrefs {
       apiToken = token,
       requireToken = p.getBoolean(KEY_REQUIRE_TOKEN, false),
       maxTokens = p.getInt(KEY_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+      contextSize = p.getInt(KEY_CONTEXT_SIZE, DEFAULT_CONTEXT_SIZE),
     )
   }
 
@@ -60,6 +68,7 @@ object RemoteApiPrefs {
       .putString(KEY_TOKEN, config.apiToken)
       .putBoolean(KEY_REQUIRE_TOKEN, config.requireToken)
       .putInt(KEY_MAX_TOKENS, config.maxTokens)
+      .putInt(KEY_CONTEXT_SIZE, config.contextSize)
       .apply()
   }
 

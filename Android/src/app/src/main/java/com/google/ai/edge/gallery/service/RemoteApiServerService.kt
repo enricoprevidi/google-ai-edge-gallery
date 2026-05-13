@@ -76,6 +76,10 @@ class RemoteApiServerService : Service() {
   private val workerExecutor = Executors.newFixedThreadPool(2)
   private val inferenceMutex = Mutex()
   private val activeModelRef = AtomicReference<Model?>(null)
+  // Effective engine context size for the active session, used to bound prompts.
+  @Volatile private var activeContextSize: Int = RemoteApiPrefs.DEFAULT_CONTEXT_SIZE
+  // Saved per-model MAX_TOKENS configValue we override at startup and restore on stop.
+  private var savedModelMaxTokens: Pair<Model, Any?>? = null
   @Volatile private var running = false
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -110,8 +114,10 @@ class RemoteApiServerService : Service() {
   private fun startServer() {
     if (running) return
     val cfg = RemoteApiPrefs.read(this)
+    RemoteApiServerLog.info("server", "Start requested (model=${cfg.modelName}, port=${cfg.port}, contextSize=${cfg.contextSize})")
     if (cfg.modelName.isBlank()) {
       RemoteApiServerHolder.update(RemoteApiServerStatus.Error("No model selected."))
+      RemoteApiServerLog.error("server", "No model selected")
       stopSelf()
       return
     }
@@ -154,6 +160,19 @@ class RemoteApiServerService : Service() {
         if (model.instance != null) {
           LlmChatModelHelper.cleanUp(model) {}
         }
+        // Override the model's MAX_TOKENS config for this session so the engine
+        // is built with enough KV cache to swallow agent-style prompts from
+        // Continue/Cursor (Continue's tool-augmented system prompt alone can
+        // be 5-6K tokens). The chat-UI value is restored when the server stops.
+        val maxTokensKey = com.google.ai.edge.gallery.data.ConfigKeys.MAX_TOKENS.label
+        val prior = model.configValues[maxTokensKey]
+        savedModelMaxTokens = model to prior
+        activeContextSize = cfg.contextSize.coerceAtLeast(2048)
+        val mutable = model.configValues.toMutableMap()
+        mutable[maxTokensKey] = activeContextSize
+        model.configValues = mutable
+        Log.i(TAG, "Engine context size set to $activeContextSize (was $prior)")
+        RemoteApiServerLog.info("engine", "Initializing ${model.name} with context size $activeContextSize (was $prior)")
         var initError: String? = null
         val initLatch = java.util.concurrent.CountDownLatch(1)
         LlmChatModelHelper.initialize(
@@ -173,10 +192,12 @@ class RemoteApiServerService : Service() {
         initLatch.await()
         if (initError != null) {
           RemoteApiServerHolder.update(RemoteApiServerStatus.Error(initError!!))
+          RemoteApiServerLog.error("engine", "Initialize failed: $initError")
           stopSelfQuietly()
           return@execute
         }
         activeModelRef.set(model)
+        RemoteApiServerLog.info("engine", "Model loaded")
 
         // Bind the socket.
         val ss = ServerSocket(cfg.port, 50, java.net.InetAddress.getByName("0.0.0.0"))
@@ -186,10 +207,12 @@ class RemoteApiServerService : Service() {
         RemoteApiServerHolder.update(RemoteApiServerStatus.Running(model.name, ip, cfg.port))
         updateNotification("Serving ${model.name} at http://$ip:${cfg.port}")
         Log.i(TAG, "Server bound on $ip:${cfg.port}")
+        RemoteApiServerLog.info("server", "Listening on http://$ip:${cfg.port}")
 
         acceptLoop(ss, cfg)
       } catch (e: Exception) {
         Log.e(TAG, "Failed to start server", e)
+        RemoteApiServerLog.error("server", "Start failed: ${e.message ?: e.javaClass.simpleName}")
         RemoteApiServerHolder.update(
           RemoteApiServerStatus.Error("Failed to start: ${e.message ?: e.javaClass.simpleName}")
         )
@@ -222,7 +245,18 @@ class RemoteApiServerService : Service() {
         Log.w(TAG, "cleanUp failed", e)
       }
     }
+    // Restore the user's per-model MAX_TOKENS chat setting.
+    val saved = savedModelMaxTokens
+    if (saved != null) {
+      val (m, prior) = saved
+      val maxTokensKey = com.google.ai.edge.gallery.data.ConfigKeys.MAX_TOKENS.label
+      val mutable = m.configValues.toMutableMap()
+      if (prior == null) mutable.remove(maxTokensKey) else mutable[maxTokensKey] = prior
+      m.configValues = mutable
+      savedModelMaxTokens = null
+    }
     RemoteApiServerHolder.update(RemoteApiServerStatus.Stopped)
+    RemoteApiServerLog.info("server", "Stopped")
   }
 
   private fun stopSelfQuietly() {
@@ -241,6 +275,11 @@ class RemoteApiServerService : Service() {
         val out = s.getOutputStream()
         val req = parseRequest(input) ?: return@use
         Log.d(TAG, "${req.method} ${req.path}")
+        val clientHint = (s.remoteSocketAddress?.toString() ?: "") +
+          (req.headers["user-agent"]?.let { " — $it" } ?: "")
+        if (req.path != "/healthz") {
+          RemoteApiServerLog.debug("http", "${req.method} ${req.path} from ${clientHint.ifBlank { "unknown" }}")
+        }
 
         if (cfg.requireToken && req.path != "/healthz") {
           val auth = req.headers["authorization"] ?: ""
@@ -253,7 +292,7 @@ class RemoteApiServerService : Service() {
         when {
           req.method == "GET" && req.path == "/healthz" -> sendJson(out, 200, """{"status":"ok"}""")
           req.method == "GET" && req.path == "/v1/models" -> handleModelsList(out)
-          req.method == "POST" && req.path == "/v1/chat/completions" -> handleChat(out, req, cfg)
+          req.method == "POST" && req.path == "/v1/chat/completions" -> handleChat(out, req, cfg, clientHint)
           req.method == "OPTIONS" -> sendOptions(out)
           else -> sendJson(out, 404, """{"error":{"message":"Not found"}}""")
         }
@@ -270,26 +309,40 @@ class RemoteApiServerService : Service() {
     sendJson(out, 200, """{"object":"list","data":$data}""")
   }
 
-  private fun handleChat(out: OutputStream, req: HttpRequest, cfg: RemoteApiPrefs.Config) {
+  private fun handleChat(out: OutputStream, req: HttpRequest, cfg: RemoteApiPrefs.Config, clientHint: String) {
+    val requestId = RemoteApiServerLog.beginRequest(
+      clientHint = clientHint,
+      path = req.path,
+      contextSizeTokens = activeContextSize,
+    )
     val model = activeModelRef.get()
     if (model == null || model.instance == null) {
       sendJson(out, 503, """{"error":{"message":"No model loaded"}}""")
+      RemoteApiServerLog.finishRequest(finishReason = "error", toolCallsEmitted = 0, error = "No model loaded")
+      RemoteApiServerLog.error("chat", "No model loaded", requestId)
       return
     }
     val body = try {
       JsonParser.parseString(req.body).asJsonObject
     } catch (e: Exception) {
       sendJson(out, 400, """{"error":{"message":"Invalid JSON: ${escapeJson(e.message ?: "")}"}}""")
+      RemoteApiServerLog.finishRequest("error", 0, error = "Invalid JSON")
       return
     }
     val stream = body.get("stream")?.asBoolean ?: false
     val messages = body.getAsJsonArray("messages") ?: run {
       sendJson(out, 400, """{"error":{"message":"messages array is required"}}""")
+      RemoteApiServerLog.finishRequest("error", 0, error = "messages array missing")
       return
     }
     val requestMaxTokens = body.get("max_tokens")?.let {
       runCatching { it.asInt }.getOrNull()
     }
+
+    // OpenAI-style tool calling (used by Continue, Cursor, etc. agent modes).
+    // We bridge it in/out of the model's plain text channel — see OpenAiToolBridge.
+    val toolSpecs = OpenAiToolBridge.parseToolSpecs(body.getAsJsonArray("tools"))
+    val toolsEnabled = toolSpecs.isNotEmpty()
 
     // Flatten OpenAI messages into a single prompt + system instruction.
     val systemSb = StringBuilder()
@@ -298,35 +351,93 @@ class RemoteApiServerService : Service() {
       val obj = m.asJsonObject
       val role = obj.get("role")?.asString ?: "user"
       val content = extractContentAsText(obj.get("content"))
-      if (content.isBlank()) continue
       when (role) {
-        "system" -> { if (systemSb.isNotEmpty()) systemSb.append("\n"); systemSb.append(content) }
-        "user" -> convoSb.append("User: ").append(content).append("\n")
-        "assistant" -> convoSb.append("Assistant: ").append(content).append("\n")
-        else -> convoSb.append(role).append(": ").append(content).append("\n")
+        "system" -> {
+          if (content.isBlank()) continue
+          if (systemSb.isNotEmpty()) systemSb.append("\n")
+          systemSb.append(content)
+        }
+        "user" -> {
+          if (content.isBlank()) continue
+          convoSb.append("User: ").append(content).append("\n")
+        }
+        "assistant" -> {
+          val toolCallsText = OpenAiToolBridge.formatAssistantToolCalls(
+            obj.getAsJsonArray("tool_calls")
+          )
+          if (content.isBlank() && toolCallsText.isBlank()) continue
+          convoSb.append("Assistant: ")
+          if (content.isNotBlank()) convoSb.append(content)
+          if (toolCallsText.isNotBlank()) {
+            if (content.isNotBlank()) convoSb.append("\n")
+            convoSb.append(toolCallsText)
+          }
+          convoSb.append("\n")
+        }
+        "tool" -> {
+          val toolName = obj.get("name")?.asString
+            ?: obj.get("tool_call_id")?.asString
+          convoSb.append("User: ")
+            .append(OpenAiToolBridge.formatToolResult(toolName, content))
+            .append("\n")
+        }
+        else -> {
+          if (content.isBlank()) continue
+          convoSb.append(role).append(": ").append(content).append("\n")
+        }
       }
     }
     convoSb.append("Assistant: ")
     val prompt = convoSb.toString()
-    val systemInstruction = systemSb.toString().ifBlank { null }
+
+    val toolSuffix = OpenAiToolBridge.buildToolSystemSuffix(toolSpecs)
+    val systemInstruction = buildString {
+      append(systemSb)
+      if (toolSuffix.isNotEmpty()) {
+        if (isNotEmpty()) append("\n\n")
+        append(toolSuffix)
+      }
+    }.ifBlank { null }
+
+    // Snapshot the assembled prompt so the control-panel UI can show what the
+    // model is about to see.
+    RemoteApiServerLog.updatePrompt(
+      streaming = stream,
+      toolsCount = toolSpecs.size,
+      systemInstruction = systemInstruction ?: "",
+      prompt = prompt,
+    )
+    RemoteApiServerLog.info(
+      "chat",
+      "→ ${if (stream) "streaming" else "buffered"} request: tools=${toolSpecs.size}, " +
+        "sys=${(systemInstruction?.length ?: 0)} chars, prompt=${prompt.length} chars",
+      requestId,
+    )
 
     // Soft input-length guard. The engine's prefill cache has a hard limit
-    // (32K for Gemma-4 family). We use ~4 chars-per-token as a conservative
-    // estimate and reject before crashing the engine mid-stream.
+    // (set at initialize time — see [activeContextSize]). We use ~4 chars-per-
+    // token as a conservative estimate and reject before crashing the engine
+    // mid-stream.
     //
-    // Layout of a 32K KV cache: [ system + prompt | response ]
+    // Layout of the KV cache: [ system + prompt | response ]
     //   responseBudget  = max_tokens from request, else cfg.maxTokens, capped at 4096
-    //   promptBudget    = 32000 - responseBudget - 512 (safety)
+    //   promptBudget    = activeContextSize - responseBudget - 512 (safety)
     val approxTokens = (prompt.length + (systemInstruction?.length ?: 0)) / 4
     val responseBudget = (requestMaxTokens ?: cfg.maxTokens).coerceIn(64, 4096)
-    val promptBudget = (32_000 - responseBudget - 512).coerceAtLeast(2_000)
+    val promptBudget = (activeContextSize - responseBudget - 512).coerceAtLeast(2_000)
     if (approxTokens > promptBudget) {
       Log.w(TAG, "Rejecting oversized prompt: ~$approxTokens tokens > $promptBudget (response budget=$responseBudget)")
+      RemoteApiServerLog.warn(
+        "chat",
+        "Rejected oversized prompt: ~$approxTokens > $promptBudget (response budget $responseBudget)",
+        requestId,
+      )
       sendJson(
         out,
         400,
         """{"error":{"message":"Prompt too long (~$approxTokens tokens, limit $promptBudget with $responseBudget reserved for response). Trim the conversation history or reduce file context.","type":"context_length_exceeded","code":"context_length_exceeded"}}""",
       )
+      RemoteApiServerLog.finishRequest("error", 0, error = "context_length_exceeded")
       return
     }
 
@@ -349,13 +460,20 @@ class RemoteApiServerService : Service() {
             enableConversationConstrainedDecoding = false,
           )
 
-          if (stream) {
-            runStreamingInference(out, model, prompt)
+          if (toolsEnabled) {
+            // When tools are in play we must inspect the full text to detect
+            // <tool_call> markers — so always buffer, then emit either a
+            // streaming or non-streaming response with tool_calls if present.
+            runToolAwareInference(out, model, prompt, stream, requestId)
+          } else if (stream) {
+            runStreamingInference(out, model, prompt, requestId)
           } else {
-            runBufferedInference(out, model, prompt)
+            runBufferedInference(out, model, prompt, requestId)
           }
         } catch (e: Exception) {
           Log.e(TAG, "Inference error", e)
+          RemoteApiServerLog.error("chat", "Inference exception: ${e.message ?: e.javaClass.simpleName}", requestId)
+          RemoteApiServerLog.finishRequest("error", 0, error = e.message)
           try {
             sendJson(out, 500, """{"error":{"message":"${escapeJson(e.message ?: "Inference failed")}"}}""")
           } catch (_: Exception) {}
@@ -364,7 +482,7 @@ class RemoteApiServerService : Service() {
     }
   }
 
-  private fun runStreamingInference(out: OutputStream, model: Model, prompt: String) {
+  private fun runStreamingInference(out: OutputStream, model: Model, prompt: String, requestId: Long) {
     val writer = PrintWriter(OutputStreamWriter(out, StandardCharsets.UTF_8), false)
     writer.print(
       "HTTP/1.1 200 OK\r\n" +
@@ -424,6 +542,7 @@ class RemoteApiServerService : Service() {
           done.countDown()
         } else {
           if (partialToken.isNotEmpty()) {
+            RemoteApiServerLog.appendResponse(partialToken)
             val chunk = JsonObject().apply {
               addProperty("id", id)
               addProperty("object", "chat.completion.chunk")
@@ -454,10 +573,29 @@ class RemoteApiServerService : Service() {
     )
     done.await()
     val err = errorRef.get()
-    if (err != null) Log.w(TAG, "streaming error: $err")
+    if (err != null) {
+      Log.w(TAG, "streaming error: $err")
+      RemoteApiServerLog.error("chat", "Streaming error: $err", requestId)
+      RemoteApiServerLog.finishRequest("error", 0, error = err)
+    } else {
+      RemoteApiServerLog.info("chat", "← streaming complete", requestId)
+      RemoteApiServerLog.finishRequest("stop", 0)
+    }
   }
 
-  private fun runBufferedInference(out: OutputStream, model: Model, prompt: String) {
+  /**
+   * Runs inference, buffers the full response, then emits a tool-aware reply.
+   * If the model's output contains tool-call markers, we surface them in the
+   * OpenAI `tool_calls` field with `finish_reason="tool_calls"`; otherwise we
+   * fall back to plain content.
+   */
+  private fun runToolAwareInference(
+    out: OutputStream,
+    model: Model,
+    prompt: String,
+    stream: Boolean,
+    requestId: Long,
+  ) {
     val sb = StringBuilder()
     val done = java.util.concurrent.CountDownLatch(1)
     val errorRef = AtomicReference<String?>(null)
@@ -465,7 +603,10 @@ class RemoteApiServerService : Service() {
       model = model,
       input = prompt,
       resultListener = { partialToken, isDone, _ ->
-        if (partialToken.isNotEmpty()) sb.append(partialToken)
+        if (partialToken.isNotEmpty()) {
+          sb.append(partialToken)
+          RemoteApiServerLog.appendResponse(partialToken)
+        }
         if (isDone) done.countDown()
       },
       cleanUpListener = {},
@@ -479,6 +620,160 @@ class RemoteApiServerService : Service() {
     val err = errorRef.get()
     if (err != null) {
       sendJson(out, 500, """{"error":{"message":"${escapeJson(err)}"}}""")
+      RemoteApiServerLog.error("chat", "Tool-aware inference error: $err", requestId)
+      RemoteApiServerLog.finishRequest("error", 0, error = err)
+      return
+    }
+    val parsed = OpenAiToolBridge.extractToolCalls(sb.toString())
+    val hasToolCalls = parsed.toolCalls.isNotEmpty()
+    if (hasToolCalls) {
+      val names = parsed.toolCalls.joinToString(", ") { it.name }
+      RemoteApiServerLog.info("chat", "← tool_calls: $names", requestId)
+    } else {
+      RemoteApiServerLog.info("chat", "← plain text response (${parsed.remainingText.length} chars)", requestId)
+    }
+    val id = "chatcmpl-${System.currentTimeMillis()}"
+    val created = System.currentTimeMillis() / 1000
+
+    if (!stream) {
+      val message = JsonObject().apply {
+        addProperty("role", "assistant")
+        if (hasToolCalls) {
+          // OpenAI clients expect content to be null when tool_calls are set.
+          add("content", com.google.gson.JsonNull.INSTANCE)
+          add("tool_calls", OpenAiToolBridge.toToolCallsArray(parsed.toolCalls))
+        } else {
+          addProperty("content", parsed.remainingText)
+        }
+      }
+      val response = JsonObject().apply {
+        addProperty("id", id)
+        addProperty("object", "chat.completion")
+        addProperty("created", created)
+        addProperty("model", model.name)
+        add("choices", com.google.gson.JsonArray().apply {
+          add(JsonObject().apply {
+            addProperty("index", 0)
+            add("message", message)
+            addProperty("finish_reason", if (hasToolCalls) "tool_calls" else "stop")
+          })
+        })
+      }
+      sendJson(out, 200, Gson().toJson(response))
+      RemoteApiServerLog.finishRequest(
+        finishReason = if (hasToolCalls) "tool_calls" else "stop",
+        toolCallsEmitted = parsed.toolCalls.size,
+      )
+      return
+    }
+
+    // Streaming path: emit the full result as one or two SSE chunks. Continue
+    // and similar agent clients buffer chunks and only act on finish_reason,
+    // so a single-shot emission is sufficient and avoids partial-JSON parsing.
+    val writer = PrintWriter(OutputStreamWriter(out, StandardCharsets.UTF_8), false)
+    writer.print(
+      "HTTP/1.1 200 OK\r\n" +
+        "Content-Type: text/event-stream\r\n" +
+        "Cache-Control: no-cache\r\n" +
+        "Connection: keep-alive\r\n" +
+        "Access-Control-Allow-Origin: *\r\n" +
+        "X-Accel-Buffering: no\r\n" +
+        "Transfer-Encoding: chunked\r\n\r\n"
+    )
+    writer.flush()
+
+    fun writeChunk(payload: String) {
+      val data = "data: $payload\n\n"
+      val bytes = data.toByteArray(StandardCharsets.UTF_8)
+      writer.print("${bytes.size.toString(16)}\r\n"); writer.flush()
+      out.write(bytes); out.write("\r\n".toByteArray()); out.flush()
+    }
+
+    fun baseChunk(delta: JsonObject, finish: String?): JsonObject = JsonObject().apply {
+      addProperty("id", id)
+      addProperty("object", "chat.completion.chunk")
+      addProperty("created", created)
+      addProperty("model", model.name)
+      add("choices", com.google.gson.JsonArray().apply {
+        add(JsonObject().apply {
+          addProperty("index", 0)
+          add("delta", delta)
+          if (finish != null) addProperty("finish_reason", finish)
+          else add("finish_reason", com.google.gson.JsonNull.INSTANCE)
+        })
+      })
+    }
+
+    try {
+      if (hasToolCalls) {
+        // Single chunk with role + tool_calls (each with arguments stringified).
+        val toolCallsDelta = com.google.gson.JsonArray()
+        for ((idx, c) in parsed.toolCalls.withIndex()) {
+          toolCallsDelta.add(JsonObject().apply {
+            addProperty("index", idx)
+            addProperty("id", c.id)
+            addProperty("type", "function")
+            add("function", JsonObject().apply {
+              addProperty("name", c.name)
+              addProperty("arguments", c.argumentsJson)
+            })
+          })
+        }
+        val delta = JsonObject().apply {
+          addProperty("role", "assistant")
+          add("tool_calls", toolCallsDelta)
+        }
+        writeChunk(Gson().toJson(baseChunk(delta, null)))
+        writeChunk(Gson().toJson(baseChunk(JsonObject(), "tool_calls")))
+      } else {
+        val delta = JsonObject().apply {
+          addProperty("role", "assistant")
+          addProperty("content", parsed.remainingText)
+        }
+        writeChunk(Gson().toJson(baseChunk(delta, null)))
+        writeChunk(Gson().toJson(baseChunk(JsonObject(), "stop")))
+      }
+      writeChunk("[DONE]")
+      writer.print("0\r\n\r\n")
+      writer.flush()
+      RemoteApiServerLog.finishRequest(
+        finishReason = if (hasToolCalls) "tool_calls" else "stop",
+        toolCallsEmitted = parsed.toolCalls.size,
+      )
+    } catch (e: Exception) {
+      Log.w(TAG, "tool-aware stream emit failed", e)
+      RemoteApiServerLog.error("chat", "Stream emit failed: ${e.message}", requestId)
+      RemoteApiServerLog.finishRequest("error", parsed.toolCalls.size, error = e.message)
+    }
+  }
+
+  private fun runBufferedInference(out: OutputStream, model: Model, prompt: String, requestId: Long) {
+    val sb = StringBuilder()
+    val done = java.util.concurrent.CountDownLatch(1)
+    val errorRef = AtomicReference<String?>(null)
+    LlmChatModelHelper.runInference(
+      model = model,
+      input = prompt,
+      resultListener = { partialToken, isDone, _ ->
+        if (partialToken.isNotEmpty()) {
+          sb.append(partialToken)
+          RemoteApiServerLog.appendResponse(partialToken)
+        }
+        if (isDone) done.countDown()
+      },
+      cleanUpListener = {},
+      onError = { msg -> errorRef.set(msg); done.countDown() },
+      images = emptyList(),
+      audioClips = emptyList(),
+      coroutineScope = null,
+      extraContext = null,
+    )
+    done.await()
+    val err = errorRef.get()
+    if (err != null) {
+      sendJson(out, 500, """{"error":{"message":"${escapeJson(err)}"}}""")
+      RemoteApiServerLog.error("chat", "Buffered inference error: $err", requestId)
+      RemoteApiServerLog.finishRequest("error", 0, error = err)
       return
     }
     val response = JsonObject().apply {
@@ -497,6 +792,8 @@ class RemoteApiServerService : Service() {
       ))
     }
     sendJson(out, 200, Gson().toJson(response))
+    RemoteApiServerLog.info("chat", "← buffered response (${sb.length} chars)", requestId)
+    RemoteApiServerLog.finishRequest("stop", 0)
   }
 
   // ── HTTP plumbing ──────────────────────────────────────────────────────
